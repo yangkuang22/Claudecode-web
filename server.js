@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Claude Web — 零依赖的 Claude Code 网页聊天前端（Linux / macOS / Windows / Termux）
-// 用法: node server.js [--port 8765] [--host 127.0.0.1] [--cwd 项目目录] [--lan] [--open | --no-open]
+// 用法: node server.js [--port 8765] [--host 127.0.0.1] [--cwd 项目目录] [--lan] [--no-token] [--open | --no-open]
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -64,8 +64,9 @@ function openBrowser(url) {
 }
 const LOCAL_ONLY = HOST === '127.0.0.1' || HOST === 'localhost';
 // 仅本机访问时不需要令牌；开放局域网时使用固定令牌（保存在 token 文件里，网址不会每次变）
+// --no-token：局域网也不要令牌（自己家里一个人用时省事，但同一网络的任何人都能打开）
 const TOKEN = (() => {
-  if (LOCAL_ONLY) return null;
+  if (LOCAL_ONLY || flag('no-token')) return null;
   const f = path.join(DATA_DIR, 'token');
   try { const t = fs.readFileSync(f, 'utf8').trim(); if (t) return t; } catch {}
   const t = crypto.randomBytes(12).toString('hex');
@@ -229,6 +230,8 @@ function textOfUserContent(c) {
   return '';
 }
 const isNoise = (t) => !t || /^\s*<(command-|local-command|system-reminder)/.test(t) || t.startsWith('Caveat:');
+// Claude Code 自己塞进会话的“用户”消息（后台任务完成通知等），不是用户本人发的
+const isSystemPrompt = (o) => o.promptSource === 'system' || (!!o.origin && !!o.origin.kind && o.origin.kind !== 'human');
 
 function readHead(p, bytes) {
   const fd = fs.openSync(p, 'r');
@@ -306,7 +309,7 @@ function listSessions(cwd) {
         let o; try { o = JSON.parse(line); } catch { continue; }
         if (o.type === 'custom-title' && o.customTitle != null) customTitle = o.customTitle;
         if (o.type === 'ai-title' && o.aiTitle && !/^Resume session /.test(o.aiTitle)) aiTitle = o.aiTitle;
-        if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain) {
+        if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain && !isSystemPrompt(o)) {
           const c = o.message && o.message.content;
           const t = textOfUserContent(c);
           if (!isNoise(t)) title = t.trim().slice(0, 80);
@@ -385,6 +388,13 @@ function loadHistory(cwd, id) {
   for (const line of raw.split('\n')) {
     let o; try { o = JSON.parse(line); } catch { continue; }
     if (o.isSidechain || o.isMeta) continue;
+    if (o.type === 'user' && o.message && isSystemPrompt(o)) {
+      // 后台任务通知只显示一行摘要，其他系统消息不显示
+      const t = textOfUserContent(o.message.content);
+      const s = t.match(/<summary>([\s\S]*?)<\/summary>/);
+      if (/<task-notification>/.test(t)) items.push({ kind: 'command', text: '⚙ 后台任务：' + (s ? s[1].trim() : '已结束') });
+      continue;
+    }
     if (o.type === 'user' && o.message) {
       const c = o.message.content;
       const images = [], files = [];
@@ -619,7 +629,7 @@ function printUrl(link, already) {
   console.log('\n  \x1b[1;38;5;209m✻ Claude Web\x1b[0m  ' + (already ? '已经在运行中' : '初始项目: \x1b[1m' + START_CWD + '\x1b[0m'));
   console.log('\n  在浏览器打开（Termux 中长按网址可直接打开，建议加入书签）:\n');
   console.log('  \x1b[4;36m' + link + '\x1b[0m\n');
-  if (!LOCAL_ONLY) console.log('  ⚠ 已开放局域网访问，网址中的令牌请勿外泄\n');
+  if (!LOCAL_ONLY) console.log(TOKEN ? '  ⚠ 已开放局域网访问，网址中的令牌请勿外泄\n' : '  ⚠ 已开放局域网访问且未启用令牌，同一网络的任何人都能打开\n');
   try { fs.writeFileSync(path.join(DATA_DIR, 'last-url.txt'), link + '\n'); } catch {}
   if (AUTO_OPEN) openBrowser(link);
 }
@@ -647,11 +657,20 @@ function listen() {
     console.log('  按 Ctrl+C 停止\n');
   });
 }
+// 选真实网卡的局域网地址：跳过代理 TUN、WSL/Hyper-V、Docker、虚拟机网卡，优先 192.168.x / 10.x
 function lanIp() {
-  for (const list of Object.values(os.networkInterfaces())) {
-    for (const a of list || []) if (a.family === 'IPv4' && !a.internal) return a.address;
+  const virtual = /tun|tap|vEthernet|WSL|Hyper-V|docker|br-|veth|VMware|VirtualBox|vbox|utun|Loopback|ZeroTier|Tailscale/i;
+  let best = null, bestScore = -1;
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family !== 'IPv4' && a.family !== 4) continue;
+      if (a.internal || a.address.startsWith('169.254.')) continue;
+      let score = virtual.test(name) ? 0 : 2;
+      if (/^192\.168\.|^10\./.test(a.address)) score += 1;
+      if (score > bestScore) { best = a.address; bestScore = score; }
+    }
   }
-  return '127.0.0.1';
+  return best || '127.0.0.1';
 }
 const shutdown = () => { for (const r of runs.values()) if (!r.done) killProc(r.child, true); process.exit(0); };
 process.on('SIGINT', shutdown);

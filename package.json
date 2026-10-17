@@ -1,0 +1,18 @@
+{
+  "name": "claude-web",
+  "version": "1.0.0",
+  "description": "零依赖的 Claude Code 网页聊天前端，支持 Windows / macOS / Linux / Android Termux",
+  "bin": {
+    "claude-web": "server.js"
+  },
+  "files": [
+    "server.js",
+    "index.html",
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["claude", "claude-code", "web-ui", "termux"],
+  "license": "MIT"
+}

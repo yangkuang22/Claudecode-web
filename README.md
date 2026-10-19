@@ -66,6 +66,15 @@ ln -sf ~/claude-web/bin/cw ~/.local/bin/cw   # 确保 ~/.local/bin 在 PATH 里
 cd 你的项目 && cw
 ```
 
+更新到最新版：`cd ~/claude-web && git pull`，然后重启 `cw`。
+
+如果以前是把 `server.js` / `index.html` 手动拷到 `~/.claude-web/` 里运行的，可以换成指向仓库的软链接，以后 `git pull` 就自动生效：
+
+```bash
+ln -sf ~/claude-web/server.js ~/.claude-web/server.js
+ln -sf ~/claude-web/index.html ~/.claude-web/index.html
+```
+
 终端里会打印网址，长按即可在浏览器打开。proot 里调不起安卓浏览器；如果想自动打开，可以在 Termux 那一侧读取 `~/.claude-web/last-url.txt` 再用 `termux-open-url` 打开。
 
 ## 命令行参数

@@ -86,6 +86,10 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }
 .md p { margin: 0 0 .7em; }
+.md-media { display: block; max-width: 100%; max-height: 60vh; border-radius: 8px; margin: 8px 0; cursor: zoom-in; background: var(--code-bg); }
+video.md-media { cursor: auto; width: 100%; }
+.tbody .md-media { margin: 8px 12px; max-width: calc(100% - 24px); max-height: 40vh; }
+.md code.media-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .md h1, .md h2, .md h3, .md h4 { margin: 1em 0 .5em; line-height: 1.35; }
 .md h1 { font-size: 1.35em; } .md h2 { font-size: 1.22em; } .md h3 { font-size: 1.1em; } .md h4 { font-size: 1em; }
 .md ul, .md ol { margin: 0 0 .7em; padding-left: 1.5em; }
@@ -424,9 +428,27 @@ async function getJSON(url, opts) {
 
 // ================= Markdown =================
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// 本地图片 / 视频：通过 /api/media 读取；网络图片和 data:image 直接用
+const MEDIA_EXT = /\.(png|jpe?g|gif|webp|bmp|avif|mp4|m4v|webm|mov)$/i;
+const VIDEO_EXT = /\.(mp4|m4v|webm|mov)$/i;
+function mediaUrl(src) {
+  if (/^(https?:\/\/|data:image\/)/i.test(src)) return src;
+  return '/api/media?' + new URLSearchParams({ path: src, cwd: S.cwd || '' });
+}
+function mediaHtml(src, alt) {
+  src = src.trim();
+  const u = esc(mediaUrl(src));
+  if (VIDEO_EXT.test(src.split('?')[0])) return `<video class="md-media" src="${u}" controls preload="metadata" playsinline></video>`;
+  return `<img class="md-media" src="${u}" alt="${esc(alt || baseName(src))}" title="${esc(src)}" loading="lazy">`;
+}
 function inline(s) {
   const codes = [];
-  s = s.replace(/`([^`\n]+)`/g, (m, c) => { codes.push('<code>' + esc(c) + '</code>'); return '\u0000' + (codes.length - 1) + '\u0000'; });
+  const keep = (h) => { codes.push(h); return '\u0000' + (codes.length - 1) + '\u0000'; };
+  // 行内代码里的图片 / 视频路径可以点开查看
+  s = s.replace(/`([^`\n]+)`/g, (m, c) => keep(MEDIA_EXT.test(c.trim()) && !/[<>"|*?\n]/.test(c)
+    ? `<code class="media-link" data-media="${esc(c.trim())}">${esc(c)}</code>` : '<code>' + esc(c) + '</code>'));
+  // ![说明](路径) 或 ![说明](<带空格的路径>)
+  s = s.replace(/!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\n]+?))\s*\)/g, (m, alt, a, b) => keep(mediaHtml(a || b, alt)));
   s = esc(s)
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*\w])\*(?!\s)([^*\n]+?)\*(?!\w)/g, '$1<em>$2</em>')
@@ -576,9 +598,12 @@ function addCommand(text) {
 function addCommandOut(text) {
   const d = el('div', 'cmd-out md'); d.innerHTML = md(text); chat.appendChild(d); S.turn = null;
 }
+function viewImage(src) { $('viewer').querySelector('img').src = src; $('viewer').classList.add('show'); }
 chat.addEventListener('click', (e) => {
-  const img = e.target.closest('.msg-user img'); if (!img) return;
-  $('viewer').querySelector('img').src = img.src; $('viewer').classList.add('show');
+  const img = e.target.closest('.msg-user img, img.md-media');
+  if (img) return viewImage(img.src);
+  const c = e.target.closest('code[data-media]');
+  if (c) VIDEO_EXT.test(c.dataset.media) ? window.open(mediaUrl(c.dataset.media), '_blank') : viewImage(mediaUrl(c.dataset.media));
 });
 $('viewer').onclick = () => $('viewer').classList.remove('show');
 function newTurn() {
@@ -662,6 +687,12 @@ function setToolResult(id, content, isError) {
   st.className = 'tstat ' + (isError ? 'err' : 'ok'); st.textContent = isError ? '✗' : '✓';
   const txt = resultText(content).trim();
   if (txt) { const p = el('pre', 'tout' + (isError ? ' err' : '')); p.textContent = clip(txt, 8000); d.querySelector('.tbody').appendChild(p); }
+  // Read 读图片时结果里带着图片本身，直接显示
+  if (Array.isArray(content)) for (const b of content) {
+    if (b.type === 'image' && b.source?.type === 'base64' && /^image\//.test(b.source.media_type || '')) {
+      const img = el('img', 'md-media'); img.src = `data:${b.source.media_type};base64,${b.source.data}`; d.querySelector('.tbody').appendChild(img);
+    }
+  }
 }
 function notice(text, err) { const n = el('div', 'notice' + (err ? ' err' : '')); n.textContent = text; ensureTurn().appendChild(n); scrollDown(); }
 
@@ -1351,7 +1382,17 @@ function renderPills() {
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
 }
-function setPref(k, v) { prefs[k] = v; store.set(k, v); renderPills(); }
+function setPref(k, v) {
+  prefs[k] = v; store.set(k, v); renderPills();
+  fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [k]: v }) }).catch(() => {});
+}
+// 以服务端保存的为准（localStorage 按网址区分，换了 IP / 端口 / 设备就是另一份）
+getJSON('/api/prefs').then((p) => {
+  // 服务端还没有记录：把这个浏览器里原有的选择存上去
+  if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
+  for (const k of ['model', 'effort', 'perm']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  renderPills();
+}).catch(() => {});
 
 function pick(title, list, cur, onPick) {
   $('pickTitle').textContent = title;

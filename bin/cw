@@ -2,14 +2,15 @@
 # cw — 在当前目录启动 Claude Web（Linux / macOS / Termux）
 #   cw              仅本机访问，固定网址 http://127.0.0.1:8765
 #   cw --lan        允许局域网内其他设备访问（如电脑、平板）
+#   cw --lan --no-token  局域网访问且不要令牌（网址固定，只适合自己家里用）
 #   cw --port 9000  指定端口
 #   cw [目录]       指定项目目录
 DIR="$PWD"; EXTRA=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --lan|--open|--no-open) EXTRA+=("$1") ;;
+    --lan|--no-token|--open|--no-open) EXTRA+=("$1") ;;
     --port) EXTRA+=("--port" "$2"); shift ;;
-    -h|--help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) DIR="$(cd "$1" 2>/dev/null && pwd)" || { echo "目录不存在: $1"; exit 1; } ;;
   esac
   shift

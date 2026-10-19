@@ -78,6 +78,15 @@ const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const INDEX_HTML = path.join(__dirname, 'index.html');
 const SID_RE = /^[0-9a-f-]{36}$/;
 const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+// 回复里可以直接显示的媒体文件（不含 svg：它能带脚本）
+const MEDIA_TYPES = {
+  ...IMAGE_TYPES, '.bmp': 'image/bmp', '.avif': 'image/avif',
+  '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+};
+// 告诉 Claude 这个前端能显示本地图片 / 视频
+const WEB_PROMPT = '你正在通过一个网页前端和用户对话，回复按 Markdown 渲染。'
+  + '要给用户看本地的图片或视频时，用 Markdown 图片语法 ![说明](文件绝对路径) 引用，网页会直接显示出来'
+  + '（支持 png jpg gif webp bmp avif mp4 webm mov）；路径里有空格时写成 ![说明](<路径>)。';
 
 const sessionDir = (cwd) => path.join(PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
 function checkDir(p) {
@@ -136,6 +145,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (model) cliArgs.push('--model', model);
   if (effort) cliArgs.push('--effort', effort);
   if (permissionMode) cliArgs.push('--permission-mode', permissionMode);
+  cliArgs.push('--append-system-prompt', WEB_PROMPT);
   const env = { ...process.env };
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
@@ -578,6 +588,46 @@ const server = http.createServer(async (req, res) => {
         if (!p.startsWith(UPLOAD_DIR + path.sep)) return json(res, 403, { error: 'forbidden' });
         const type = IMAGE_TYPES[path.extname(p).toLowerCase()] || 'application/octet-stream';
         res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=86400' });
+        return fs.createReadStream(p).on('error', () => res.end()).pipe(res);
+      }
+      case '/api/prefs': {
+        // 模型 / effort / 权限选择存在服务端，换网址、换设备、重启都保持上一次的选择
+        const f = path.join(DATA_DIR, 'prefs.json');
+        let cur = {};
+        try { cur = JSON.parse(fs.readFileSync(f, 'utf8')); } catch {}
+        if (req.method === 'PUT') {
+          const body = await readBody(req);
+          if (typeof body.model === 'string' && /^[\w.\-\[\]]*$/.test(body.model)) cur.model = body.model;
+          if (['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) cur.effort = body.effort;
+          if (typeof body.perm === 'string' && /^[a-zA-Z]+$/.test(body.perm)) cur.perm = body.perm;
+          fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
+        }
+        return json(res, 200, cur);
+      }
+      case '/api/media': {
+        // Claude 在回复里引用的本地图片 / 视频（只允许这些扩展名；支持 Range，视频可以拖动进度）
+        let p = q('path').replace(/^file:\/\/\/?/i, '');
+        if (/^~[\\/]/.test(p)) p = path.join(os.homedir(), p.slice(2));
+        if (!path.isAbsolute(p) && q('cwd')) p = path.join(q('cwd'), p);
+        p = path.resolve(p);
+        const type = MEDIA_TYPES[path.extname(p).toLowerCase()];
+        if (!type) return json(res, 403, { error: '只能查看图片或视频' });
+        let st;
+        try { st = fs.statSync(p); } catch { return json(res, 404, { error: '文件不存在' }); }
+        if (!st.isFile()) return json(res, 404, { error: '文件不存在' });
+        // 同名文件可能被覆盖（比如重复生成），用大小+修改时间做 ETag
+        const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
+        if (req.headers['if-none-match'] === etag) { res.writeHead(304, { ETag: etag }); return res.end(); }
+        const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', ETag: etag, 'Accept-Ranges': 'bytes' };
+        const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+        if (m && (m[1] || m[2])) {
+          const start = m[1] ? +m[1] : Math.max(0, st.size - +m[2]);
+          const end = m[1] && m[2] ? Math.min(+m[2], st.size - 1) : st.size - 1;
+          if (start > end) { res.writeHead(416, { 'Content-Range': `bytes */${st.size}` }); return res.end(); }
+          res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
+          return fs.createReadStream(p, { start, end }).on('error', () => res.end()).pipe(res);
+        }
+        res.writeHead(200, { ...headers, 'Content-Length': st.size });
         return fs.createReadStream(p).on('error', () => res.end()).pipe(res);
       }
       case '/api/chat': {

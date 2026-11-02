@@ -2,3 +2,18 @@ node_modules/
 *.log
 .DS_Store
 Thumbs.db
+
+# 预设内容由用户自行放入，不进仓库（保持前端干净）
+presets/
+writing-head.txt
+writing-suffix.txt
+writing-seed-user.txt
+writing-seed-assistant.txt
+
+# 调试 / 抓包产物
+capture-proxy.js
+clewdr*
+cap-*
+st-capture-*
+sys-*.txt
+*.raw

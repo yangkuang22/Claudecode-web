@@ -88,6 +88,55 @@ const WEB_PROMPT = '你正在通过一个网页前端和用户对话，回复按
   + '要给用户看本地的图片或视频时，用 Markdown 图片语法 ![说明](文件绝对路径) 引用，网页会直接显示出来'
   + '（支持 png jpg gif webp bmp avif mp4 webm mov）；路径里有空格时写成 ![说明](<路径>)。';
 
+// ============ 预设系统（用酒馆 ST 格式 json，按角色+顺序组装；预设内容由用户自行放入 presets/） ============
+const PRESETS_DIR = path.join(__dirname, 'presets');
+try { fs.mkdirSync(PRESETS_DIR, { recursive: true }); } catch {}
+// 把一份 ST 预设拆成：system（聊天历史之前的）/ suffix（之后的）/ 自攻击 assistant / 种子 user
+// 如实按预设的角色+顺序组装：
+//   role=system → 全部进 system 字段（API 只有一个 system 字段）
+//   role=assistant → 真 assistant 消息（伪装）
+//   role=user → 并进相邻的 user 消息
+//   Chat History 标记 → 真实对话插入处（本轮消息）
+// 返回：systemField(系统字段) / seedTurns(聊天历史之前的 user/assistant 轮，种进会话) /
+//       userPrefix(紧挨聊天历史之前的 user 文本，贴在本轮消息前) / userSuffix(聊天历史之后的 user 文本，贴在本轮消息后)
+function assembleFromST(d) {
+  const byId = {}; for (const p of (d.prompts || [])) byId[p.identifier] = p;
+  const order = (d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order) || [];
+  const sys = [], turns = [];
+  let buf = '', afterBuf = '', phase = 'before', leading = true;
+  const pushAssistant = (c) => {
+    if (buf.trim()) { turns.push({ role: 'user', content: buf.trim() }); buf = ''; turns.push({ role: 'assistant', content: c }); }
+    else if (turns.length && turns[turns.length - 1].role === 'assistant') turns[turns.length - 1].content += '\n\n' + c; // 连续 assistant 合并成一条
+    else { if (!turns.length) turns.push({ role: 'user', content: '继续。' }); turns.push({ role: 'assistant', content: c }); } // API 要求开头必须 user
+  };
+  for (const item of order) {
+    const p = byId[item.identifier] || {};
+    // Chat History 标记决定本轮消息插入点，不受启用状态影响
+    if (p.marker) { if (/chat history/i.test(p.name || '') || item.identifier === 'chatHistory') phase = 'after'; continue; }
+    if (!item.enabled) continue;
+    const c = p.content || ''; if (!c.trim()) continue;
+    const role = p.role || 'system';
+    // 只有「开头连续的 system」进 system 字段；一旦出现 assistant/user，后面的 system 按原位转成 user
+    if (leading && role === 'system') { sys.push(c); continue; }
+    leading = false;
+    if (phase === 'after') { afterBuf += (afterBuf ? '\n\n' : '') + c; continue; } // 聊天历史之后 → 贴本轮消息后
+    if (role === 'assistant') pushAssistant(c);
+    else buf += (buf ? '\n\n' : '') + c;  // user，或排在 assistant 之后的 system（转 user，留在原位）
+  }
+  return { systemField: sys.join('\n\n'), seedTurns: turns, userPrefix: buf.trim(), userSuffix: afterBuf.trim() };
+}
+const PRESET_RE = /^[^\/\\]+\.json$/;
+function loadPresetFile(file) {
+  if (!PRESET_RE.test(file || '')) return null;
+  try { return JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, file), 'utf8')); } catch { return null; }
+}
+// 选了预设就用预设装配；没选返回 null（=普通 agent，不替换系统提示词）
+function getAssembled(file) { const d = loadPresetFile(file); return d ? assembleFromST(d) : null; }
+function listPresets() {
+  let files = []; try { files = fs.readdirSync(PRESETS_DIR).filter((f) => f.endsWith('.json')); } catch {}
+  return files.map((f) => { let name = f; try { name = JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, f), 'utf8')).name || f; } catch {} return { file: f, name }; });
+}
+
 const sessionDir = (cwd) => path.join(PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
 function checkDir(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) throw new Error('路径必须是绝对路径');
@@ -139,13 +188,44 @@ function rewindSession(cwd, sessionId, uuid) {
   return true;
 }
 
-function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode }) {
+// 种一个带「用户→AI 自我确认」的新会话文件，返回新 sessionId（供 --resume）。
+// 这两条带 seed:true，loadHistory 会跳过不显示，但二进制读文件时会把它们作为真历史发给模型。
+// 把预设的 user/assistant 轮如实种进新会话，--resume 时作为真历史发给模型
+function seedWritingSession(cwd, turns) {
+  const sid = crypto.randomUUID();
+  const dir = sessionDir(cwd); fs.mkdirSync(dir, { recursive: true });
+  const ts = () => new Date().toISOString();
+  const lines = [{ type: 'mode', mode: 'normal', sessionId: sid }, { type: 'permission-mode', permissionMode: 'auto', sessionId: sid }];
+  let parent = null;
+  for (const t of (turns || [])) {
+    const uuid = crypto.randomUUID();
+    const msg = t.role === 'assistant' ? { role: 'assistant', content: [{ type: 'text', text: t.content }] } : { role: 'user', content: t.content };
+    lines.push({ parentUuid: parent, isSidechain: false, cwd, sessionId: sid, version: '2.1.289', seed: true, type: t.role, userType: 'external', message: msg, uuid, timestamp: ts() });
+    parent = uuid;
+  }
+  fs.writeFileSync(path.join(dir, sid + '.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  return sid;
+}
+
+function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, assembled }) {
+  // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
+  if (assembled && assembled.seedTurns && assembled.seedTurns.length && !sessionId) {
+    try { sessionId = seedWritingSession(cwd, assembled.seedTurns); } catch {}
+  }
   const cliArgs = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (sessionId) cliArgs.push('--resume', sessionId);
   if (model) cliArgs.push('--model', model);
   if (effort) cliArgs.push('--effort', effort);
   if (permissionMode) cliArgs.push('--permission-mode', permissionMode);
-  cliArgs.push('--append-system-prompt', WEB_PROMPT);
+  if (assembled && assembled.systemField) {
+    // 预设里 role=system 的全部进 system 字段，--system-prompt-file 完全替换官方 system；
+    // WEB_PROMPT 再 append 回来保留图片渲染说明。
+    const sysFile = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
+    try { fs.writeFileSync(sysFile, assembled.systemField); cliArgs.push('--system-prompt-file', sysFile); } catch {}
+    cliArgs.push('--append-system-prompt', WEB_PROMPT);
+  } else {
+    cliArgs.push('--append-system-prompt', WEB_PROMPT);
+  }
   const env = { ...process.env };
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
@@ -187,7 +267,11 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   };
   child.on('close', finish);
   child.on('error', (e) => { errBuf += String(e); finish(1); });
-  child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: buildContent(message, attachments) } }) + '\n');
+  // 预设里聊天历史之前的 user 文本贴在本轮消息前，之后的贴在本轮消息后（复刻酒馆结构）
+  const userMsg = (assembled && assembled.userPrefix ? assembled.userPrefix + '\n\n' : '')
+    + message
+    + (assembled && assembled.userSuffix ? '\n\n' + assembled.userSuffix : '');
+  child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: buildContent(userMsg, attachments) } }) + '\n');
   return r;
 }
 
@@ -319,7 +403,7 @@ function listSessions(cwd) {
         let o; try { o = JSON.parse(line); } catch { continue; }
         if (o.type === 'custom-title' && o.customTitle != null) customTitle = o.customTitle;
         if (o.type === 'ai-title' && o.aiTitle && !/^Resume session /.test(o.aiTitle)) aiTitle = o.aiTitle;
-        if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain && !isSystemPrompt(o)) {
+        if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain && !o.seed && !isSystemPrompt(o)) {
           const c = o.message && o.message.content;
           const t = textOfUserContent(c);
           if (!isNoise(t)) title = t.trim().slice(0, 80);
@@ -397,7 +481,7 @@ function loadHistory(cwd, id) {
   const items = [];
   for (const line of raw.split('\n')) {
     let o; try { o = JSON.parse(line); } catch { continue; }
-    if (o.isSidechain || o.isMeta) continue;
+    if (o.isSidechain || o.isMeta || o.seed) continue;
     if (o.type === 'user' && o.message && isSystemPrompt(o)) {
       // 后台任务通知只显示一行摘要，其他系统消息不显示
       const t = textOfUserContent(o.message.content);
@@ -516,6 +600,26 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, await getUsage(q('force') === '1'));
       case '/api/projects':
         return json(res, 200, listProjects());
+      case '/api/presets':
+        return json(res, 200, listPresets());
+      case '/api/preset': {
+        if (req.method === 'GET') {
+          const d = loadPresetFile(q('file'));
+          return d ? json(res, 200, d) : json(res, 404, { error: '预设不存在' });
+        }
+        if (req.method === 'PUT') {
+          const body = await readBody(req);
+          if (!PRESET_RE.test(body.file || '')) return json(res, 400, { error: '文件名无效' });
+          fs.writeFileSync(path.join(PRESETS_DIR, body.file), JSON.stringify(body.data, null, 2));
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === 'DELETE') {
+          if (!PRESET_RE.test(q('file') || '')) return json(res, 400, { error: '文件名无效' });
+          fs.rmSync(path.join(PRESETS_DIR, q('file')), { force: true });
+          return json(res, 200, { ok: true });
+        }
+        return json(res, 405, { error: 'method' });
+      }
       case '/api/browse':
         return json(res, 200, browse(q('path')));
       case '/api/mkdir': {
@@ -645,9 +749,9 @@ const server = http.createServer(async (req, res) => {
           if (!/^[0-9a-f-]{36}$/.test(body.rewindTo)) return json(res, 400, { error: '无效的消息 ID' });
           if (!rewindSession(cwd, sessionId, body.rewindTo)) sessionId = null;
         }
+        const assembled = getAssembled(body.preset);  // 选了预设就装配：替换 system + 种自攻击 + 后置
         const r = startRun({
-          cwd, message, attachments,
-          sessionId,
+          cwd, message, attachments, sessionId, assembled,
           model: /^[\w.\-\[\]]+$/.test(body.model || '') ? body.model : null,
           effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : null,
           permissionMode: /^[a-zA-Z]+$/.test(body.permissionMode || '') ? body.permissionMode : null,

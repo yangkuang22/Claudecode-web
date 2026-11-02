@@ -368,6 +368,14 @@ textarea {
   </div>
 </div>
 
+<div class="modal" id="psModal">
+  <div class="sheet">
+    <div class="sheet-h"><b>预设编辑</b><button class="icon-btn" id="psClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div style="padding:6px 12px;color:var(--dim);font-size:13px">勾选=启用该模块，选角色，改名，点「内容」改正文，✕删除，＋新增。保存后，选中的预设会替换系统提示词并伪装 assistant，对每条消息生效（不用再写 CLAUDE.md）。</div>
+    <div class="sheet-body" id="psList" style="min-height:0"></div>
+    <div class="sheet-f"><button class="btn" id="psAdd" style="flex:0 0 auto">＋ 新增条目</button><button class="btn primary" id="psSave">保存</button></div>
+  </div>
+</div>
 <div class="modal" id="pickModal">
   <div class="sheet">
     <div class="sheet-h"><b id="pickTitle"></b>
@@ -386,6 +394,7 @@ textarea {
     <button class="pill" id="modelPill">模型 <b></b></button>
     <button class="pill" id="effortPill">effort <b></b></button>
     <button class="pill" id="permPill">权限 <b></b></button>
+    <button class="pill" id="presetPill">预设 <b></b></button>
     <button class="pill" id="usagePill">用量 <span class="bar"><i style="width:0"></i></span> <b></b></button>
   </div>
   <div class="chips" id="chips"></div>
@@ -860,6 +869,7 @@ async function send() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: S.ctrl.signal,
       body: JSON.stringify({
         cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm,
+        preset: prefs.preset,
         attachments: atts.map((a) => ({ path: a.path, name: a.name })), rewindTo,
       }),
     });
@@ -1374,13 +1384,15 @@ const PERMS = [
   ['plan', '只规划', 'plan：只读，不改任何东西'],
   ['default', '严格', 'default：需要确认的操作一律拒绝'],
 ];
-const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits') };
+const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), preset: store.get('preset', '') };
 const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
   $('effortPill').querySelector('b').textContent = prefs.effort || '默认';
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
+  $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
+  $('presetPill').classList.toggle('warn', !!prefs.preset);
 }
 function setPref(k, v) {
   prefs[k] = v; store.set(k, v); renderPills();
@@ -1418,6 +1430,107 @@ $('modelPill').onclick = () => pick('选择模型', MODELS, prefs.model, (v) => 
 });
 $('effortPill').onclick = () => pick('思考强度（effort）', EFFORTS, prefs.effort, (v) => setPref('effort', v));
 $('permPill').onclick = () => pick('权限模式', PERMS, prefs.perm, (v) => setPref('perm', v));
+// 写作模式：开启后把破限头作为系统级指令注入（见 server.js 的 writing-head.txt）。仅存本浏览器。
+// 预设选择
+$('presetPill').onclick = async () => {
+  let list = []; try { list = await getJSON('/api/presets'); } catch {}
+  const opts = list.map((p) => [p.file, p.name, '']);
+  opts.push(['__none', '（不用预设）', '不替换系统提示词，普通 agent']);
+  opts.push(['__new', '＋ 新建空白预设', '']);
+  if (list.length) opts.push(['__edit', '✎ 编辑当前预设…', '']);
+  if (prefs.preset) opts.push(['__del', '🗑 删除当前预设', prefs.preset]);
+  pick('选择预设', opts, prefs.preset || '__none', (v) => {
+    if (v === '__new') return createBlankPreset();
+    if (v === '__edit') return openPsEditor(prefs.preset || (list[0] && list[0].file));
+    if (v === '__del') return deletePreset(prefs.preset);
+    prefs.preset = v === '__none' ? '' : v; store.set('preset', prefs.preset); renderPills();
+  });
+};
+async function deletePreset(file) {
+  if (!file || !confirm('删除预设「' + file.replace(/\.json$/, '') + '」？不可恢复')) return;
+  try { await getJSON('/api/preset?file=' + encodeURIComponent(file), { method: 'DELETE' }); prefs.preset = ''; store.set('preset', ''); renderPills(); notice('预设已删除'); }
+  catch { notice('删除失败', true); }
+}
+async function createBlankPreset() {
+  const name = (prompt('新预设名字：', '我的预设') || '').trim();
+  if (!name) return;
+  const file = name.replace(/[^\w一-龥.\-]/g, '_').replace(/\.json$/i, '') + '.json';
+  const data = { name, prompts: [{ identifier: 'chatHistory', name: 'Chat History', marker: true, system_prompt: false }],
+    prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }] };
+  try {
+    await getJSON('/api/preset', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file, data }) });
+    prefs.preset = file; store.set('preset', file); renderPills();
+    openPsEditor(file);
+  } catch { notice('新建失败', true); }
+}
+// 预设编辑器
+const PS = { file: '', data: null };
+async function openPsEditor(file) {
+  if (!file) return notice('先选一个预设', true);
+  let d; try { d = await getJSON('/api/preset?file=' + encodeURIComponent(file)); } catch { return notice('加载失败', true); }
+  PS.file = file; PS.data = d; renderPsEditor(); $('psModal').classList.add('show');
+}
+function renderPsEditor() {
+  const d = PS.data, byId = {};
+  (d.prompts || []).forEach((p) => byId[p.identifier] = p);
+  const order = (d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order) || [];
+  const box = $('psList'); box.innerHTML = '';
+  order.forEach((it) => {
+    const p = byId[it.identifier] || (byId[it.identifier] = { identifier: it.identifier, name: it.identifier, role: 'system', content: '' });
+    const row = el('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid var(--border)';
+    const grip = el('span'); grip.textContent = '⠿'; grip.draggable = true; grip.title = '拖动排序';
+    grip.style.cssText = 'flex:0 0 auto;cursor:grab;color:var(--dim);user-select:none;padding:0 2px';
+    grip.ondragstart = (e) => { PS._drag = it; e.dataTransfer.effectAllowed = 'move'; };
+    row.ondragover = (e) => { e.preventDefault(); row.style.borderTop = '2px solid #4af'; };
+    row.ondragleave = () => { row.style.borderTop = ''; };
+    row.ondrop = (e) => { e.preventDefault(); row.style.borderTop = '';
+      if (PS._drag && PS._drag !== it) { const from = order.indexOf(PS._drag); if (from >= 0) { order.splice(from, 1); order.splice(order.indexOf(it), 0, PS._drag); renderPsEditor(); } } };
+    const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!it.enabled; cb.onchange = () => it.enabled = cb.checked;
+    row.append(grip, cb);
+    if (p.marker) {
+      const nm = el('span'); nm.textContent = '📍 ' + (p.name || it.identifier); nm.style.cssText = 'flex:1;color:var(--dim)';
+      row.append(nm);
+    } else {
+      const sel = el('select'); sel.style.cssText = 'flex:0 0 auto;font-size:11px';
+      ['system', 'user', 'assistant'].forEach((rr) => { const o = el('option'); o.value = rr; o.textContent = rr; if ((p.role || 'system') === rr) o.selected = true; sel.append(o); });
+      sel.onchange = () => p.role = sel.value;
+      const nm = el('input'); nm.value = p.name || ''; nm.style.cssText = 'flex:1;min-width:30px;font-size:13px;padding:2px 4px'; nm.oninput = () => p.name = nm.value;
+      const eb = el('button', 'btn'); eb.textContent = '内容'; eb.style.cssText = 'flex:0 0 auto;padding:2px 8px';
+      eb.onclick = () => {
+        if (row._ta) { row._ta.remove(); row._ta = null; return; }
+        const t = el('textarea'); t.value = p.content || ''; t.spellcheck = false;
+        t.style.cssText = 'width:100%;min-height:140px;margin:4px 0 8px;font-size:13px';
+        t.oninput = () => p.content = t.value;
+        box.insertBefore(t, row.nextSibling); row._ta = t;
+      };
+      const db = el('button', 'btn'); db.textContent = '✕'; db.style.cssText = 'flex:0 0 auto;padding:2px 8px;color:var(--err)';
+      db.onclick = () => { if (confirm('删除条目「' + (p.name || it.identifier) + '」？')) { order.splice(order.indexOf(it), 1); renderPsEditor(); } };
+      row.append(sel, nm, eb, db);
+    }
+    box.append(row);
+  });
+}
+$('psAdd').onclick = () => {
+  const d = PS.data;
+  if (!d.prompts) d.prompts = [];
+  if (!(d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order)) return notice('这个预设结构异常，无法新增', true);
+  const id = 'custom-' + Math.random().toString(36).slice(2, 10);
+  d.prompts.push({ identifier: id, name: '新条目', role: 'system', content: '', system_prompt: false, marker: false, injection_position: 0, injection_depth: 4 });
+  const order = d.prompt_order[0].order, byId = {};
+  d.prompts.forEach((p) => byId[p.identifier] = p);
+  const ci = order.findIndex((it) => { const p = byId[it.identifier]; return p && p.marker && /chat history/i.test(p.name || ''); });
+  const item = { identifier: id, enabled: true };
+  if (ci >= 0) order.splice(ci, 0, item); else order.push(item);  // 默认插在聊天历史之前（进 system 头）
+  renderPsEditor();
+};
+$('psClose').onclick = () => $('psModal').classList.remove('show');
+$('psModal').onclick = (e) => { if (e.target === $('psModal')) $('psModal').classList.remove('show'); };
+$('psSave').onclick = async () => {
+  try {
+    await getJSON('/api/preset', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: PS.file, data: PS.data }) });
+    notice('预设已保存'); $('psModal').classList.remove('show');
+  } catch { notice('保存失败', true); }
+};
 renderPills();
 
 // 用量：订阅的 5 小时窗口 / 每周额度

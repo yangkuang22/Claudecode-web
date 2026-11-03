@@ -1481,7 +1481,6 @@ function renderPsEditor() {
   (d.prompts || []).forEach((p) => byId[p.identifier] = p);
   const order = (psOrderObj(d) || {}).order || [];
   const box = $('psList'); box.innerHTML = '';
-  let afterHist = false;
   order.forEach((it) => {
     const p = byId[it.identifier] || (byId[it.identifier] = { identifier: it.identifier, name: it.identifier, role: 'system', content: '' });
     const row = el('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid var(--border)';
@@ -1495,16 +1494,15 @@ function renderPsEditor() {
     const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!it.enabled; cb.onchange = () => it.enabled = cb.checked;
     row.append(grip, cb);
     if (p.marker) {
-      if (/chat history/i.test(p.name || '') || it.identifier === 'chatHistory') afterHist = true;
       const nm = el('span'); nm.textContent = '📍 ' + (p.name || it.identifier); nm.style.cssText = 'flex:1;color:var(--dim)';
+      // Chat History 只是分隔线：它后面的条目会按顺序挪到聊天历史前面（不贴在最新消息后，免得打断缓存）
+      if (/chat history/i.test(p.name || '') || it.identifier === 'chatHistory') nm.title = '后面的条目会按顺序挪到聊天历史前面，和前面的条目接着排';
       row.append(nm);
     } else {
       const sel = el('select'); sel.style.cssText = 'flex:0 0 auto;font-size:11px';
       ['system', 'user', 'assistant'].forEach((rr) => { const o = el('option'); o.value = rr; o.textContent = rr; if ((p.role || 'system') === rr) o.selected = true; sel.append(o); });
       sel.onchange = () => { p.role = sel.value; renderPsEditor(); };
       const nm = el('input'); nm.value = p.name || ''; nm.style.cssText = 'flex:1;min-width:30px;font-size:13px;padding:2px 4px'; nm.oninput = () => p.name = nm.value;
-      // 聊天历史之后的 assistant = 酒馆的 prefill，claude -p 放不了结尾 assistant，服务端会跳过
-      if (afterHist && p.role === 'assistant') { sel.style.color = 'var(--err)'; sel.title = nm.title = '聊天历史之后的 assistant 不生效（Claude Code 不支持结尾预填），会被跳过'; }
       const eb = el('button', 'btn'); eb.textContent = '内容'; eb.style.cssText = 'flex:0 0 auto;padding:2px 8px';
       eb.onclick = () => {
         if (row._ta) { row._ta.remove(); row._ta = null; return; }

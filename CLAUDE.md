@@ -32,13 +32,12 @@
 
 ## 预设（酒馆 ST 格式，`presets/*.json`，不进仓库）
 
-`assembleFromST()` 按 `prompt_order`（优先 character_id 100001）以 Chat History 标记为界拆分：
+`assembleFromST()` 按 `prompt_order`（优先 character_id 100001）的顺序组装。Chat History 标记只是分隔线，标记之后的条目按原顺序挪到聊天历史之前，和前面的条目接着排：
 
 - 开头连续的 system → 系统字段。网页说明走 `--system-prompt-file`、预设走 `--append-system-prompt-file`，预设排在系统字段最后（claude 固定顺序：计费标记 → 身份行 → file → WebSearch 说明 → append）
-- Chat History 之前的 user/assistant → 种进新会话开头的真对话（`seed:true`，前端不显示）。种子不能以 user 结尾，否则 `--resume` 会自动补一条 "No response requested."
-- 最后一个 assistant 之后、Chat History 之前的文本（historyHead）→ 只拼在新会话第一条消息前
-- Chat History 之后的文本（suffix）→ 每轮贴在最新消息后；下一轮 `--resume` 前从 jsonl 旧消息上剥掉（记录在 `~/.claude-web/inject/<会话ID>.json`），显示历史/标题时也剥掉
-- Chat History 之后的 assistant（酒馆 prefill）跳过，claude -p 放不了结尾 assistant
+- user/assistant → 种进新会话开头的真对话（`seed:true`，前端不显示）。种子不能以 user 结尾，否则 `--resume` 会自动补一条 "No response requested."
+- 最后一个 assistant 之后的文本（historyHead）→ 只拼在新会话第一条消息前，显示历史/标题时剥掉（记录在 `~/.claude-web/inject/<会话ID>.json`）
+- 不再把内容贴在最新消息后、也不再改 jsonl 剥旧后缀：剥掉会让上一轮写下的缓存全部对不上（claude 的缓存标记在「上一条 assistant」和「最后一条消息」上，API 只往回找约 20 个块，工具调用多时整段历史缓存失效）
 - 对话中间的 system 没法插（外部只能改系统字段），按原位转成 user 文本
 - 加 `--system-prompt-snapshot off`，否则新版 claude 会沿用会话第一次录下的系统提示词
 - 每轮结束后 `hoistContextAttachments()` 把 Environment 等 attachment 挪到会话链最前面，第 2 轮起这条 system 排在 messages[1]；结构认不出就不动

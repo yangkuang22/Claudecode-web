@@ -30,6 +30,21 @@
 | bypassPermissions | root 用户下 Claude Code 默认禁止，服务端自动加环境变量 `IS_SANDBOX=1` |
 | 访问控制 | 只监听 127.0.0.1 时不需要令牌；`--lan` 时启用固定令牌（`~/.claude-web/token`） |
 
+## 预设（酒馆 ST 格式，`presets/*.json`，不进仓库）
+
+`assembleFromST()` 按 `prompt_order`（优先 character_id 100001）以 Chat History 标记为界拆分：
+
+- 开头连续的 system → 系统字段。网页说明走 `--system-prompt-file`、预设走 `--append-system-prompt-file`，预设排在系统字段最后（claude 固定顺序：计费标记 → 身份行 → file → WebSearch 说明 → append）
+- Chat History 之前的 user/assistant → 种进新会话开头的真对话（`seed:true`，前端不显示）。种子不能以 user 结尾，否则 `--resume` 会自动补一条 "No response requested."
+- 最后一个 assistant 之后、Chat History 之前的文本（historyHead）→ 只拼在新会话第一条消息前
+- Chat History 之后的文本（suffix）→ 每轮贴在最新消息后；下一轮 `--resume` 前从 jsonl 旧消息上剥掉（记录在 `~/.claude-web/inject/<会话ID>.json`），显示历史/标题时也剥掉
+- Chat History 之后的 assistant（酒馆 prefill）跳过，claude -p 放不了结尾 assistant
+- 对话中间的 system 没法插（外部只能改系统字段），按原位转成 user 文本
+- 加 `--system-prompt-snapshot off`，否则新版 claude 会沿用会话第一次录下的系统提示词
+- 每轮结束后 `hoistContextAttachments()` 把 Environment 等 attachment 挪到会话链最前面，第 2 轮起这条 system 排在 messages[1]；结构认不出就不动
+
+验证方法：`ANTHROPIC_BASE_URL` 指向一个只记录请求 body 的假 API，看实际发出的 system/messages。
+
 ## Windows 适配（在 Linux 上写的，Windows 上尚未实测）
 
 - `findClaude()`：按 PATH、`%USERPROFILE%\.local\bin`、`%APPDATA%\npm` 依次找 `claude.exe` / `claude.cmd`

@@ -22,7 +22,8 @@ const HOST = flag('lan') ? '0.0.0.0' : arg('host', '127.0.0.1');
 const AUTO_OPEN = flag('open') || (!flag('no-open') && (IS_WIN || process.platform === 'darwin'));
 let PORT = parseInt(arg('port', '8765'), 10);
 // 运行时数据（上传文件、回溯备份、令牌等）放在用户目录，不混进代码目录
-const DATA_DIR = process.env.CLAUDE_WEB_DATA || path.join(os.homedir(), '.claude-web');
+// 必须是绝对路径：sys 文件路径要传给 claude，claude 的 cwd 和本进程不同
+const DATA_DIR = path.resolve(process.env.CLAUDE_WEB_DATA || path.join(os.homedir(), '.claude-web'));
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // 找到 claude 可执行文件。Windows 上可能是原生安装的 claude.exe，也可能是 npm 安装的 claude.cmd
@@ -52,6 +53,22 @@ function spawnClaude(cliArgs, opts) {
   }
   return spawn(CLAUDE_BIN, cliArgs, { ...opts, windowsHide: true });
 }
+
+// 新版 claude 默认 --system-prompt-snapshot on：会话第一次请求时录下系统提示词，之后每轮/每次 --resume 都原样重发，
+// 后来传的 --system-prompt-file 被忽略（改预设、中途开关预设对已有会话都不生效）。
+// 酒馆是每次请求现拼，所以关掉。旧版本不认识这个参数会报错，启动时先看 --help 里有没有。
+// --append-system-prompt-file：用来把预设排到系统字段最后（网页说明走 --system-prompt-file 排前面）。
+// 帮助里只在 --bare 说明中以 --append-system-prompt[-file] 出现，不支持时退回旧顺序。
+let SNAPSHOT_FLAG = false, APPEND_FILE_FLAG = false;
+try {
+  const hc = spawnClaude(['--help'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+  let ho = ''; hc.stdout.on('data', (d) => { ho += d; });
+  hc.on('close', () => {
+    SNAPSHOT_FLAG = /--system-prompt-snapshot/.test(ho);
+    APPEND_FILE_FLAG = /--append-system-prompt-file|--append-system-prompt\[-file\]/.test(ho);
+  });
+  hc.on('error', () => {});
+} catch {}
 // 停止进程。Windows 没有 SIGINT，用 taskkill 连同子进程一起结束
 function killProc(child, force) {
   if (!child || child.exitCode !== null) return;
@@ -96,13 +113,23 @@ try { fs.mkdirSync(PRESETS_DIR, { recursive: true }); } catch {}
 //   role=system → 全部进 system 字段（API 只有一个 system 字段）
 //   role=assistant → 真 assistant 消息（伪装）
 //   role=user → 并进相邻的 user 消息
-//   Chat History 标记 → 真实对话插入处（本轮消息）
-// 返回：systemField(系统字段) / seedTurns(聊天历史之前的 user/assistant 轮，种进会话) /
-//       userPrefix(紧挨聊天历史之前的 user 文本，贴在本轮消息前) / userSuffix(聊天历史之后的 user 文本，贴在本轮消息后)
+//   Chat History 标记 → 真实对话插入处
+// 和酒馆一样：Chat History 之前的东西整体排在聊天记录前面、只出现一次（种进会话开头）；
+// Chat History 之后的东西跟着最新一条消息走（每轮贴在最新消息后，旧消息上的剥掉）。
+// 返回：systemField(系统字段) / seedTurns(聊天历史之前的 user/assistant 轮，种进会话开头) /
+//       historyHead(最后一个 assistant 之后、聊天历史之前的文本，只拼在新会话第一条消息前) /
+//       userPrefix(恒为空，旧版本曾把聊天历史前的文本贴在每轮消息前，留着字段兼容) / userSuffix(聊天历史之后的 user 文本，贴在最新消息后) /
+//       ignored(没法生效的条目名：聊天历史之后的 assistant = 酒馆的 prefill，claude -p 没法放结尾 assistant)
+// 酒馆预设常同时有 100000（默认顺序）和 100001（预设自己的顺序），优先用 100001
+function pickOrder(d) {
+  const po = (d && Array.isArray(d.prompt_order)) ? d.prompt_order : [];
+  const o = po.find((x) => x && x.character_id === 100001) || po[0];
+  return (o && Array.isArray(o.order)) ? o.order : [];
+}
 function assembleFromST(d) {
   const byId = {}; for (const p of (d.prompts || [])) byId[p.identifier] = p;
-  const order = (d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order) || [];
-  const sys = [], turns = [];
+  const order = pickOrder(d);
+  const sys = [], turns = [], ignored = [];
   let buf = '', afterBuf = '', phase = 'before', leading = true;
   const pushAssistant = (c) => {
     if (buf.trim()) { turns.push({ role: 'user', content: buf.trim() }); buf = ''; turns.push({ role: 'assistant', content: c }); }
@@ -112,18 +139,23 @@ function assembleFromST(d) {
   for (const item of order) {
     const p = byId[item.identifier] || {};
     // Chat History 标记决定本轮消息插入点，不受启用状态影响
-    if (p.marker) { if (/chat history/i.test(p.name || '') || item.identifier === 'chatHistory') phase = 'after'; continue; }
+    if (p.marker) { if (/chat history/i.test(p.name || '') || item.identifier === 'chatHistory') { phase = 'after'; leading = false; } continue; }
     if (!item.enabled) continue;
     const c = p.content || ''; if (!c.trim()) continue;
     const role = p.role || 'system';
-    // 只有「开头连续的 system」进 system 字段；一旦出现 assistant/user，后面的 system 按原位转成 user
+    // 只有「开头连续的 system」进 system 字段；一旦出现 assistant/user 或聊天历史，后面的 system 按原位转成 user
     if (leading && role === 'system') { sys.push(c); continue; }
     leading = false;
-    if (phase === 'after') { afterBuf += (afterBuf ? '\n\n' : '') + c; continue; } // 聊天历史之后 → 贴本轮消息后
+    if (phase === 'after') {
+      if (role === 'assistant') { ignored.push(p.name || item.identifier); continue; } // 不能当 user 文字发，角色会错
+      afterBuf += (afterBuf ? '\n\n' : '') + c; continue; // 聊天历史之后 → 贴本轮消息后
+    }
     if (role === 'assistant') pushAssistant(c);
     else buf += (buf ? '\n\n' : '') + c;  // user，或排在 assistant 之后的 system（转 user，留在原位）
   }
-  return { systemField: sys.join('\n\n'), seedTurns: turns, userPrefix: buf.trim(), userSuffix: afterBuf.trim() };
+  // 最后一个 assistant 之后、聊天历史之前的文本（historyHead）：只拼在新会话第一条真实消息前面，之后的消息都不带。
+  // 不能单独种成一条 user：种子以 user 结尾时，claude --resume 会自己补一条 "No response requested." 的 assistant。
+  return { systemField: sys.join('\n\n'), seedTurns: turns, historyHead: buf.trim(), userPrefix: '', userSuffix: afterBuf.trim(), ignored };
 }
 const PRESET_RE = /^[^\/\\]+\.json$/;
 function loadPresetFile(file) {
@@ -135,6 +167,126 @@ function getAssembled(file) { const d = loadPresetFile(file); return d ? assembl
 function listPresets() {
   let files = []; try { files = fs.readdirSync(PRESETS_DIR).filter((f) => f.endsWith('.json')); } catch {}
   return files.map((f) => { let name = f; try { name = JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, f), 'utf8')).name || f; } catch {} return { file: f, name }; });
+}
+
+// ---------- 后缀只跟着最新一条用户消息（复刻酒馆：每次请求现拼，不留在历史里） ----------
+// claude 会把拼好的整条消息存进 jsonl，不处理的话第 N 轮历史里就有 N 份后缀。
+// （现在只有后缀；prefix 只为清理旧版本留下的「每轮都贴前缀」的会话）
+// 做法：记下每个会话拼过哪些后缀（inject/<会话ID>.json），下次 --resume 前把 jsonl 里旧消息上的剥掉；
+// 显示历史、会话标题时也剥掉。记录项：{prefix, suffix} 要从 jsonl 剥；{head} 是第一条消息前的 historyHead，
+// 要留在 jsonl 里（模型每轮都要看到），只在显示时剥。
+const INJECT_DIR = path.join(DATA_DIR, 'inject');
+const injectFile = (sid) => path.join(INJECT_DIR, sid + '.json');
+function loadInjects(sid) {
+  if (!/^[0-9a-f-]{36}$/.test(sid || '')) return [];
+  try { const a = JSON.parse(fs.readFileSync(injectFile(sid), 'utf8')); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+function saveInject(sid, rec) {
+  rec = { prefix: rec.prefix || '', suffix: rec.suffix || '', head: rec.head || '' };
+  if (!/^[0-9a-f-]{36}$/.test(sid || '') || (!rec.prefix && !rec.suffix && !rec.head)) return;
+  const list = loadInjects(sid);
+  if (list.some((x) => (x.prefix || '') === rec.prefix && (x.suffix || '') === rec.suffix && (x.head || '') === rec.head)) return;
+  list.push(rec);
+  try { fs.mkdirSync(INJECT_DIR, { recursive: true }); fs.writeFileSync(injectFile(sid), JSON.stringify(list)); } catch {}
+}
+// 显示用：head 也当前缀剥
+const displayInjects = (sid) => loadInjects(sid).flatMap((x) => [x, { prefix: x.head || '', suffix: '' }]);
+// 拼法和 startRun 一致：前缀 + '\n\n' + 消息 + '\n\n' + 后缀；前缀、后缀各自完全匹配才剥
+function stripInjected(text, injects) {
+  if (typeof text !== 'string') return text;
+  let t = text;
+  for (const { prefix } of injects) {
+    if (!prefix) continue;
+    if (t.startsWith(prefix + '\n\n')) { t = t.slice(prefix.length + 2); break; }
+    if (t === prefix) { t = ''; break; }
+  }
+  for (const { suffix } of injects) {
+    if (!suffix) continue;
+    if (t.endsWith('\n\n' + suffix)) { t = t.slice(0, t.length - suffix.length - 2); break; }
+    if (t === suffix) { t = ''; break; }
+  }
+  return t;
+}
+// 把会话 jsonl 里所有真实用户消息上的前缀/后缀剥掉（幂等；剥空的文本块直接去掉，API 不收空文本块）
+// 只用 {prefix, suffix}，head 不剥
+function stripSessionInjections(cwd, sid, injects) {
+  injects = injects.filter((x) => x && (x.prefix || x.suffix)).map((x) => ({ prefix: x.prefix || '', suffix: x.suffix || '' }));
+  if (!injects.length || !/^[0-9a-f-]{36}$/.test(sid || '')) return;
+  const f = path.join(sessionDir(cwd), sid + '.jsonl');
+  let raw; try { raw = fs.readFileSync(f, 'utf8'); } catch { return; }
+  let changed = false;
+  const out = raw.split('\n').map((l) => {
+    if (!l.includes('"type":"user"')) return l;
+    let o; try { o = JSON.parse(l); } catch { return l; }
+    if (o.type !== 'user' || o.seed || o.isMeta || isSystemPrompt(o) || !o.message || !Array.isArray(o.message.content)) return l;
+    if (o.message.content.some((b) => b.type === 'tool_result')) return l;
+    let hit = false; const content = [];
+    for (const b of o.message.content) {
+      if (b.type === 'text' && typeof b.text === 'string' && !b.text.startsWith('📎')) {
+        const t = stripInjected(b.text, injects);
+        if (t !== b.text) { hit = true; if (t) content.push({ ...b, text: t }); continue; }
+      }
+      content.push(b);
+    }
+    if (!hit || !content.length) return l;
+    changed = true; o.message.content = content; return JSON.stringify(o);
+  });
+  if (!changed) return;
+  const tmp = f + '.web-tmp';
+  fs.writeFileSync(tmp, out.join('\n')); fs.renameSync(tmp, f);
+}
+
+// ---------- 把 Claude Code 的 Environment 系统消息挪到对话最前面 ----------
+// claude 第一轮会在第一条真实用户消息后挂一串 attachment（环境、模型、技能列表、子代理列表、MCP 说明、日期…），
+// 发请求时渲染成一条 role=system 消息，排在第一条真实消息后面。把这串 attachment 挪到会话链条最前面，
+// 下一轮起它就排在 messages[1]（claude 规定 messages[0] 必须是 user，再往前挪不了）。
+// 依赖 claude 内部的 jsonl 格式（parentUuid 链）：认不出就什么都不改。
+const HOIST_TYPES = new Set(['environment', 'model', 'deferred_tools_delta', 'agent_listing_delta', 'mcp_instructions_delta', 'skill_listing', 'auto_mode', 'date']);
+function hoistContextAttachments(cwd, sid) {
+  if (!/^[0-9a-f-]{36}$/.test(sid || '')) return false;
+  const f = path.join(sessionDir(cwd), sid + '.jsonl');
+  let raw; try { raw = fs.readFileSync(f, 'utf8'); } catch { return false; }
+  const rows = raw.split('\n').map((l) => { let o = null; if (l.trim()) { try { o = JSON.parse(l); } catch {} } return { l, o }; });
+  const nodes = rows.filter((r) => r.o && typeof r.o.uuid === 'string' && 'parentUuid' in r.o && !r.o.isSidechain);
+  const roots = nodes.filter((r) => r.o.parentUuid === null);
+  if (roots.length !== 1) return false;            // 压缩过/有分支等不认识的结构，不动
+  const root = roots[0];
+  if (root.o.type === 'attachment') return false;  // 已经挪过
+  // 第一条真实用户消息（不是种子、不是工具结果、不是 claude 自己塞的）
+  const ui = nodes.findIndex((r) => r.o.type === 'user' && !r.o.seed && !r.o.isMeta && !isSystemPrompt(r.o)
+    && !(r.o.message && Array.isArray(r.o.message.content) && r.o.message.content.some((b) => b.type === 'tool_result')));
+  if (ui < 0) return false;
+  const movers = [];
+  for (let i = ui + 1; i < nodes.length; i++) {
+    const o = nodes[i].o;
+    if (o.type === 'assistant' || o.type === 'user') break; // 只挪第一轮回复之前的这一串
+    if (o.type === 'attachment' && o.attachment && HOIST_TYPES.has(o.attachment.type)) movers.push(nodes[i]);
+  }
+  if (!movers.length) return false;
+  const byUuid = new Map(nodes.map((r) => [r.o.uuid, r]));
+  const moving = new Set(movers.map((r) => r.o.uuid));
+  const touched = new Set();
+  // 原来挂在被挪节点下面的节点，改挂到它们上面最近的不挪节点
+  for (const r of nodes) {
+    if (moving.has(r.o.uuid)) continue;
+    let p = r.o.parentUuid;
+    while (p && moving.has(p)) p = byUuid.get(p).o.parentUuid;
+    if (p !== r.o.parentUuid) { r.o.parentUuid = p; touched.add(r); }
+  }
+  movers.forEach((r, i) => { r.o.parentUuid = i ? movers[i - 1].o.uuid : null; touched.add(r); });
+  root.o.parentUuid = movers[movers.length - 1].o.uuid; touched.add(root);
+  // 自检：仍然只有一个起点，所有 parentUuid 都指向存在的节点
+  if (nodes.filter((r) => r.o.parentUuid === null).length !== 1) return false;
+  if (nodes.some((r) => r.o.parentUuid && !byUuid.has(r.o.parentUuid))) return false;
+  const out = [];
+  for (const r of rows) {
+    if (r === root) out.push(...movers.map((m) => JSON.stringify(m.o)));
+    if (movers.includes(r)) continue;
+    out.push(touched.has(r) ? JSON.stringify(r.o) : r.l);
+  }
+  const tmp = f + '.web-tmp';
+  fs.writeFileSync(tmp, out.join('\n')); fs.renameSync(tmp, f);
+  return true;
 }
 
 const sessionDir = (cwd) => path.join(PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
@@ -182,7 +334,8 @@ function rewindSession(cwd, sessionId, uuid) {
   const keep = lines.slice(0, idx);
   // 截断点之后的会话标题记录保留下来
   for (const l of lines.slice(idx)) if (/"type":"(custom-title|ai-title)"/.test(l)) keep.push(l);
-  const hasConversation = keep.some((l) => /"type":"(user|assistant)"/.test(l) && !l.includes('"isMeta":true'));
+  // 只剩预设种子（伪装对话）也算空：开新会话，重新种子 + 第一条消息前拼 historyHead
+  const hasConversation = keep.some((l) => /"type":"(user|assistant)"/.test(l) && !l.includes('"isMeta":true') && !l.includes('"seed":true'));
   if (!hasConversation) { fs.rmSync(f, { force: true }); return false; }
   fs.writeFileSync(f, keep.filter((l) => l.trim()).join('\n') + '\n');
   return true;
@@ -208,24 +361,43 @@ function seedWritingSession(cwd, turns) {
 }
 
 function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, assembled }) {
+  const isNew = !sessionId;
   // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
-  if (assembled && assembled.seedTurns && assembled.seedTurns.length && !sessionId) {
+  if (assembled && assembled.seedTurns && assembled.seedTurns.length && isNew) {
     try { sessionId = seedWritingSession(cwd, assembled.seedTurns); } catch {}
+  }
+  // head：聊天历史之前的文本，只拼在新会话第一条消息前（之后一直留在历史开头）；suffix：每轮贴在最新消息后
+  const head = (isNew && assembled && assembled.historyHead) || '';
+  const suffix = (assembled && assembled.userSuffix) || '';
+  // 续接旧会话：先把历史里旧消息上的后缀剥掉，只让本轮这条带（预设关掉了也照样剥）
+  if (!isNew) {
+    try { stripSessionInjections(cwd, sessionId, [...loadInjects(sessionId), { suffix }]); } catch {}
+    // 上一轮如果异常退出没来得及挪，这里补一次（幂等）
+    if (assembled) { try { hoistContextAttachments(cwd, sessionId); } catch {} }
   }
   const cliArgs = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (sessionId) cliArgs.push('--resume', sessionId);
   if (model) cliArgs.push('--model', model);
   if (effort) cliArgs.push('--effort', effort);
   if (permissionMode) cliArgs.push('--permission-mode', permissionMode);
+  if (SNAPSHOT_FLAG) cliArgs.push('--system-prompt-snapshot', 'off'); // 系统提示词每轮按当前预设现发，不沿用会话开头录下的
+  const sysFiles = [];
+  const tmpFile = (text) => {
+    const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
+    fs.writeFileSync(f, text); sysFiles.push(f); return f;
+  };
   if (assembled && assembled.systemField) {
-    // 预设里 role=system 的全部进 system 字段，--system-prompt-file 完全替换官方 system；
-    // WEB_PROMPT 再 append 回来保留图片渲染说明。
-    const sysFile = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
-    try { fs.writeFileSync(sysFile, assembled.systemField); cliArgs.push('--system-prompt-file', sysFile); } catch {}
-    cliArgs.push('--append-system-prompt', WEB_PROMPT);
+    // 预设里开头连续的 system 进系统字段，--system-prompt-file 完全替换官方 system。
+    // 系统字段排列顺序（claude 固定）：计费标记 → 身份行 → system-prompt-file → WebSearch 说明等 → append
+    // 所以网页说明放 file、预设放 append-file，预设就排在系统字段最后。
+    try {
+      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(WEB_PROMPT), '--append-system-prompt-file', tmpFile(assembled.systemField));
+      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', WEB_PROMPT); // 旧版 claude
+    } catch { cliArgs.push('--append-system-prompt', WEB_PROMPT); }
   } else {
     cliArgs.push('--append-system-prompt', WEB_PROMPT);
   }
+  const hoist = !!assembled; // 开预设时，每轮结束后把 Environment 等挪到对话最前面
   const env = { ...process.env };
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
@@ -248,7 +420,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
       if (!line) continue;
       try {
         const ev = JSON.parse(line);
-        if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) r.sessionId = ev.session_id;
+        if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) { r.sessionId = ev.session_id; saveInject(r.sessionId, { suffix, head }); }
         if (ev.type === 'user' && !ev.parent_tool_use_id && Array.isArray(ev.message?.content)
             && !ev.message.content.some((b) => b.type === 'tool_result')) continue; // 用户消息回显，前端已显示
       } catch { continue; }
@@ -259,6 +431,8 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   child.stderr.on('data', (d) => { errBuf += d.toString(); });
   const finish = (code) => {
     if (r.done) return;
+    for (const f of sysFiles) { try { fs.rmSync(f, { force: true }); } catch {} }
+    if (hoist && r.sessionId) { try { hoistContextAttachments(cwd, r.sessionId); } catch {} } // 进程已退出，可以安全改文件
     if (code && errBuf.trim()) push(JSON.stringify({ type: 'web_error', message: errBuf.trim().slice(-2000) }));
     push(JSON.stringify({ type: 'web_done', code, sessionId: r.sessionId }));
     r.done = true;
@@ -268,9 +442,8 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   child.on('close', finish);
   child.on('error', (e) => { errBuf += String(e); finish(1); });
   // 预设里聊天历史之前的 user 文本贴在本轮消息前，之后的贴在本轮消息后（复刻酒馆结构）
-  const userMsg = (assembled && assembled.userPrefix ? assembled.userPrefix + '\n\n' : '')
-    + message
-    + (assembled && assembled.userSuffix ? '\n\n' + assembled.userSuffix : '');
+  // 拼法改了的话 stripInjected 要跟着改
+  const userMsg = (head ? head + '\n\n' : '') + message + (suffix ? '\n\n' + suffix : '');
   child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: buildContent(userMsg, attachments) } }) + '\n');
   return r;
 }
@@ -397,6 +570,7 @@ function listSessions(cwd) {
     let st;
     try { st = fs.statSync(p); } catch { continue; }
     let title = '', customTitle = '', aiTitle = '';
+    const injects = displayInjects(f.slice(0, -6));
     try {
       for (const line of readHeadTail(p, 256 * 1024).split('\n')) {
         if (!line.includes('"type":"user"') && !line.includes('title"')) continue;
@@ -405,7 +579,7 @@ function listSessions(cwd) {
         if (o.type === 'ai-title' && o.aiTitle && !/^Resume session /.test(o.aiTitle)) aiTitle = o.aiTitle;
         if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain && !o.seed && !isSystemPrompt(o)) {
           const c = o.message && o.message.content;
-          const t = textOfUserContent(c);
+          const t = stripInjected(textOfUserContent(c), injects);
           if (!isNoise(t)) title = t.trim().slice(0, 80);
           else if (Array.isArray(c) && c.some((b) => b.type === 'image' || (b.type === 'text' && b.text.startsWith('📎')))) title = '[附件]';
         }
@@ -424,6 +598,7 @@ function deleteSession(cwd, id) {
   const dir = sessionDir(cwd);
   fs.rmSync(path.join(dir, id + '.jsonl'), { force: true });
   fs.rmSync(path.join(dir, id), { recursive: true, force: true }); // 会话附带的子代理/工具结果目录
+  fs.rmSync(injectFile(id), { force: true });
 }
 
 function renameSession(cwd, id, title) {
@@ -479,6 +654,7 @@ function loadHistory(cwd, id) {
   let raw;
   try { raw = fs.readFileSync(path.join(sessionDir(cwd), id + '.jsonl'), 'utf8'); } catch { return []; }
   const items = [];
+  const injects = displayInjects(id);
   for (const line of raw.split('\n')) {
     let o; try { o = JSON.parse(line); } catch { continue; }
     if (o.isSidechain || o.isMeta || o.seed) continue;
@@ -504,7 +680,7 @@ function loadHistory(cwd, id) {
           }
         }
       }
-      const t = textOfUserContent(c);
+      const t = stripInjected(textOfUserContent(c), injects); // 最新一条还带着前缀/后缀，显示时剥掉
       const cmd = t.match(/<command-name>(\/?[^<]+)<\/command-name>(?:[\s\S]*?<command-args>([^<]*)<\/command-args>)?/);
       const out = t.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
       if (cmd) items.push({ kind: 'command', text: (cmd[1].startsWith('/') ? cmd[1] : '/' + cmd[1]) + (cmd[2] ? ' ' + cmd[2] : '') });

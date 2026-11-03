@@ -1470,11 +1470,18 @@ async function openPsEditor(file) {
   let d; try { d = await getJSON('/api/preset?file=' + encodeURIComponent(file)); } catch { return notice('加载失败', true); }
   PS.file = file; PS.data = d; renderPsEditor(); $('psModal').classList.add('show');
 }
+// 和服务端 pickOrder 一致：优先 character_id 100001（预设自己的顺序），没有再用第一个
+function psOrderObj(d) {
+  const po = (d && Array.isArray(d.prompt_order)) ? d.prompt_order : [];
+  const o = po.find((x) => x && x.character_id === 100001) || po[0];
+  return (o && Array.isArray(o.order)) ? o : null;
+}
 function renderPsEditor() {
   const d = PS.data, byId = {};
   (d.prompts || []).forEach((p) => byId[p.identifier] = p);
-  const order = (d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order) || [];
+  const order = (psOrderObj(d) || {}).order || [];
   const box = $('psList'); box.innerHTML = '';
+  let afterHist = false;
   order.forEach((it) => {
     const p = byId[it.identifier] || (byId[it.identifier] = { identifier: it.identifier, name: it.identifier, role: 'system', content: '' });
     const row = el('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid var(--border)';
@@ -1488,13 +1495,16 @@ function renderPsEditor() {
     const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!it.enabled; cb.onchange = () => it.enabled = cb.checked;
     row.append(grip, cb);
     if (p.marker) {
+      if (/chat history/i.test(p.name || '') || it.identifier === 'chatHistory') afterHist = true;
       const nm = el('span'); nm.textContent = '📍 ' + (p.name || it.identifier); nm.style.cssText = 'flex:1;color:var(--dim)';
       row.append(nm);
     } else {
       const sel = el('select'); sel.style.cssText = 'flex:0 0 auto;font-size:11px';
       ['system', 'user', 'assistant'].forEach((rr) => { const o = el('option'); o.value = rr; o.textContent = rr; if ((p.role || 'system') === rr) o.selected = true; sel.append(o); });
-      sel.onchange = () => p.role = sel.value;
+      sel.onchange = () => { p.role = sel.value; renderPsEditor(); };
       const nm = el('input'); nm.value = p.name || ''; nm.style.cssText = 'flex:1;min-width:30px;font-size:13px;padding:2px 4px'; nm.oninput = () => p.name = nm.value;
+      // 聊天历史之后的 assistant = 酒馆的 prefill，claude -p 放不了结尾 assistant，服务端会跳过
+      if (afterHist && p.role === 'assistant') { sel.style.color = 'var(--err)'; sel.title = nm.title = '聊天历史之后的 assistant 不生效（Claude Code 不支持结尾预填），会被跳过'; }
       const eb = el('button', 'btn'); eb.textContent = '内容'; eb.style.cssText = 'flex:0 0 auto;padding:2px 8px';
       eb.onclick = () => {
         if (row._ta) { row._ta.remove(); row._ta = null; return; }
@@ -1513,10 +1523,11 @@ function renderPsEditor() {
 $('psAdd').onclick = () => {
   const d = PS.data;
   if (!d.prompts) d.prompts = [];
-  if (!(d.prompt_order && d.prompt_order[0] && d.prompt_order[0].order)) return notice('这个预设结构异常，无法新增', true);
+  const oo = psOrderObj(d);
+  if (!oo) return notice('这个预设结构异常，无法新增', true);
   const id = 'custom-' + Math.random().toString(36).slice(2, 10);
   d.prompts.push({ identifier: id, name: '新条目', role: 'system', content: '', system_prompt: false, marker: false, injection_position: 0, injection_depth: 4 });
-  const order = d.prompt_order[0].order, byId = {};
+  const order = oo.order, byId = {};
   d.prompts.forEach((p) => byId[p.identifier] = p);
   const ci = order.findIndex((it) => { const p = byId[it.identifier]; return p && p.marker && /chat history/i.test(p.name || ''); });
   const item = { identifier: id, enabled: true };

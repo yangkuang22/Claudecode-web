@@ -40,7 +40,7 @@
 - 不再把内容贴在最新消息后、也不再改 jsonl 剥旧后缀：剥掉会让上一轮写下的缓存全部对不上（claude 的缓存标记在「上一条 assistant」和「最后一条消息」上，API 只往回找约 20 个块，工具调用多时整段历史缓存失效）
 - 对话中间的 system 没法插（外部只能改系统字段），按原位转成 user 文本
 - 加 `--system-prompt-snapshot off`，否则新版 claude 会沿用会话第一次录下的系统提示词
-- 每轮结束后 `hoistContextAttachments()` 把 Environment 等 attachment 挪到会话链最前面，第 2 轮起这条 system 排在 messages[1]；结构认不出就不动
+- 不改动 claude 自己的 Environment 等 attachment 的位置（第一条真实消息之后）：挪动会改变提示词结构，影响缓存命中
 
 验证方法：`ANTHROPIC_BASE_URL` 指向一个只记录请求 body 的假 API，看实际发出的 system/messages。
 

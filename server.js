@@ -198,58 +198,6 @@ function stripInjected(text, injects) {
   }
   return t;
 }
-// ---------- 把 Claude Code 的 Environment 系统消息挪到对话最前面 ----------
-// claude 第一轮会在第一条真实用户消息后挂一串 attachment（环境、模型、技能列表、子代理列表、MCP 说明、日期…），
-// 发请求时渲染成一条 role=system 消息，排在第一条真实消息后面。把这串 attachment 挪到会话链条最前面，
-// 下一轮起它就排在 messages[1]（claude 规定 messages[0] 必须是 user，再往前挪不了）。
-// 依赖 claude 内部的 jsonl 格式（parentUuid 链）：认不出就什么都不改。
-const HOIST_TYPES = new Set(['environment', 'model', 'deferred_tools_delta', 'agent_listing_delta', 'mcp_instructions_delta', 'skill_listing', 'auto_mode', 'date']);
-function hoistContextAttachments(cwd, sid) {
-  if (!/^[0-9a-f-]{36}$/.test(sid || '')) return false;
-  const f = path.join(sessionDir(cwd), sid + '.jsonl');
-  let raw; try { raw = fs.readFileSync(f, 'utf8'); } catch { return false; }
-  const rows = raw.split('\n').map((l) => { let o = null; if (l.trim()) { try { o = JSON.parse(l); } catch {} } return { l, o }; });
-  const nodes = rows.filter((r) => r.o && typeof r.o.uuid === 'string' && 'parentUuid' in r.o && !r.o.isSidechain);
-  const roots = nodes.filter((r) => r.o.parentUuid === null);
-  if (roots.length !== 1) return false;            // 压缩过/有分支等不认识的结构，不动
-  const root = roots[0];
-  if (root.o.type === 'attachment') return false;  // 已经挪过
-  // 第一条真实用户消息（不是种子、不是工具结果、不是 claude 自己塞的）
-  const ui = nodes.findIndex((r) => r.o.type === 'user' && !r.o.seed && !r.o.isMeta && !isSystemPrompt(r.o)
-    && !(r.o.message && Array.isArray(r.o.message.content) && r.o.message.content.some((b) => b.type === 'tool_result')));
-  if (ui < 0) return false;
-  const movers = [];
-  for (let i = ui + 1; i < nodes.length; i++) {
-    const o = nodes[i].o;
-    if (o.type === 'assistant' || o.type === 'user') break; // 只挪第一轮回复之前的这一串
-    if (o.type === 'attachment' && o.attachment && HOIST_TYPES.has(o.attachment.type)) movers.push(nodes[i]);
-  }
-  if (!movers.length) return false;
-  const byUuid = new Map(nodes.map((r) => [r.o.uuid, r]));
-  const moving = new Set(movers.map((r) => r.o.uuid));
-  const touched = new Set();
-  // 原来挂在被挪节点下面的节点，改挂到它们上面最近的不挪节点
-  for (const r of nodes) {
-    if (moving.has(r.o.uuid)) continue;
-    let p = r.o.parentUuid;
-    while (p && moving.has(p)) p = byUuid.get(p).o.parentUuid;
-    if (p !== r.o.parentUuid) { r.o.parentUuid = p; touched.add(r); }
-  }
-  movers.forEach((r, i) => { r.o.parentUuid = i ? movers[i - 1].o.uuid : null; touched.add(r); });
-  root.o.parentUuid = movers[movers.length - 1].o.uuid; touched.add(root);
-  // 自检：仍然只有一个起点，所有 parentUuid 都指向存在的节点
-  if (nodes.filter((r) => r.o.parentUuid === null).length !== 1) return false;
-  if (nodes.some((r) => r.o.parentUuid && !byUuid.has(r.o.parentUuid))) return false;
-  const out = [];
-  for (const r of rows) {
-    if (r === root) out.push(...movers.map((m) => JSON.stringify(m.o)));
-    if (movers.includes(r)) continue;
-    out.push(touched.has(r) ? JSON.stringify(r.o) : r.l);
-  }
-  const tmp = f + '.web-tmp';
-  fs.writeFileSync(tmp, out.join('\n')); fs.renameSync(tmp, f);
-  return true;
-}
 
 const sessionDir = (cwd) => path.join(PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
 function checkDir(p) {
@@ -330,8 +278,6 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   }
   // head：预设里最后一个 assistant 之后的文本，只拼在新会话第一条消息前（之后一直留在历史开头）
   const head = (isNew && assembled && assembled.historyHead) || '';
-  // 续接旧会话：上一轮如果异常退出没来得及挪，这里补一次（幂等）
-  if (!isNew && assembled) { try { hoistContextAttachments(cwd, sessionId); } catch {} }
   const cliArgs = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
   if (sessionId) cliArgs.push('--resume', sessionId);
   if (model) cliArgs.push('--model', model);
@@ -354,8 +300,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   } else {
     cliArgs.push('--append-system-prompt', WEB_PROMPT);
   }
-  const hoist = !!assembled; // 开预设时，每轮结束后把 Environment 等挪到对话最前面
-  const env = { ...process.env };
+  const env ={ ...process.env };
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
 
@@ -389,7 +334,6 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   const finish = (code) => {
     if (r.done) return;
     for (const f of sysFiles) { try { fs.rmSync(f, { force: true }); } catch {} }
-    if (hoist && r.sessionId) { try { hoistContextAttachments(cwd, r.sessionId); } catch {} } // 进程已退出，可以安全改文件
     if (code && errBuf.trim()) push(JSON.stringify({ type: 'web_error', message: errBuf.trim().slice(-2000) }));
     push(JSON.stringify({ type: 'web_done', code, sessionId: r.sessionId }));
     r.done = true;

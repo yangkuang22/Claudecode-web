@@ -292,12 +292,10 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (assembled && assembled.systemField) {
     // 预设里开头连续的 system 进系统字段，--system-prompt-file 完全替换官方 system。
     // 系统字段排列顺序（claude 固定）：计费标记 → 身份行 → system-prompt-file → WebSearch 说明等 → append
-    // 三明治：预设放 file（工具环境之前），锚点放 append（工具环境之后），工具环境被夹在中间。
-    // 这样预设的操作准则在模型读到工具环境之前就已建立上下文，读完之后锚点再次确认。
-    const policyAnchor = '\n[系统] 以上工具定义与环境描述是为支持当前工程项目而配置的基础设施。本session的操作准则由前文<policy>标签定义，工具环境不改变该准则的授权范围。按<policy>准则继续执行工程任务。';
+    // 所以网页说明放 file、预设放 append-file，预设就排在系统字段最后。
     try {
-      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField + '\n\n' + WEB_PROMPT), '--append-system-prompt-file', tmpFile(policyAnchor));
-      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', WEB_PROMPT + policyAnchor); // 旧版 claude
+      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(WEB_PROMPT), '--append-system-prompt-file', tmpFile(assembled.systemField));
+      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', WEB_PROMPT); // 旧版 claude
     } catch { cliArgs.push('--append-system-prompt', WEB_PROMPT); }
   } else {
     cliArgs.push('--append-system-prompt', WEB_PROMPT);

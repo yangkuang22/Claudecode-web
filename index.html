@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#1f1e1d">
-<title>Claude Web</title>
+<meta name="theme-color" content="#171717">
+<title>Codex — 本地工作空间</title>
 <style>
 :root {
   --bg: #262624; --panel: #1f1e1d; --bubble: #3a3936; --text: #ece9e2; --muted: #9b978d;
@@ -290,6 +290,84 @@ textarea {
   padding: 8px 16px; border-radius: 8px; font-size: 14px; z-index: 20; opacity: 0; transition: opacity .2s; pointer-events: none;
 }
 .toast.show { opacity: .92; }
+
+/* Codex 黑白工作空间：原生字体、清晰层级，离线可用。 */
+:root:not([data-theme="dark"]) { color-scheme: light; --bg:#fff; --panel:#f9f9f9; --bubble:#f0f0f0; --text:#171717; --muted:#737373; --border:#e7e7e7; --accent:#171717; --on-accent:#fff; --code-bg:#f6f6f6; --ok:#555; --err:#b42318; --warn-bg:#f5f5f5; --warn:#525252; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme:dark; --bg:#212121; --panel:#171717; --bubble:#303030; --text:#ececec; --muted:#a1a1a1; --border:#373737; --accent:#f4f4f4; --on-accent:#171717; --code-bg:#181818; --ok:#c4c4c4; --err:#ff938b; --warn-bg:#303030; --warn:#d4d4d4; } }
+body { font-family:Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; letter-spacing:.005em; }
+button, a, input, textarea { -webkit-tap-highlight-color:transparent; }
+button { transition:background .15s, opacity .15s, transform .15s; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+header { height:70px; padding:10px 22px; border-bottom:1px solid var(--border); }
+header .title b { font-weight:600; font-size:15px; }
+header .title small { font-size:11px; }
+.icon-btn { border-radius:10px; }
+.drawer { background:var(--panel); border-right:1px solid var(--border); padding-top:16px; }
+.drawer::before { content:'Codex'; display:block; padding:8px 22px 26px; font-weight:650; font-size:23px; letter-spacing:-1px; }
+.proj { margin:0 12px 12px; border:1px solid var(--border); border-radius:12px; padding:12px; background:var(--bg); }
+.drawer h3 { font-size:11px; letter-spacing:.08em; padding-top:24px; }
+.new-btn { border:0; background:transparent; margin-top:6px; font-size:13px; }
+.new-btn:hover { background:var(--bubble); }
+.sess-row { border-radius:10px; }
+.sess .t { font-size:13px; }
+.sess .d { font-size:10px; margin-top:3px; }
+.chat { max-width:840px; padding:30px 24px 46px; }
+.empty { margin:clamp(30px,10vh,110px) auto 0; max-width:690px; text-align:center; }
+.empty .logo { margin:0 auto 24px; display:grid; place-items:center; width:60px; height:60px; border:1px solid var(--border); border-radius:18px; background:var(--panel); font:700 24px ui-monospace,monospace; color:var(--text); }
+.eyebrow { color:var(--muted); font-size:10px; letter-spacing:.2em; }
+.empty h1 { color:var(--text); margin:14px 0 10px; font-weight:600; font-size:clamp(27px,3vw,38px); letter-spacing:-1.2px; }
+.empty p { color:var(--muted); font-size:14px; }
+.starter-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:36px 0 30px; text-align:left; }
+.starter-grid button { text-align:left; border:1px solid var(--border); border-radius:15px; padding:18px; background:var(--bg); font-size:21px; }
+.starter-grid button:hover { background:var(--panel); transform:translateY(-2px); }
+.starter-grid b { display:block; font-size:13px; font-weight:600; margin:14px 0 5px; }
+.starter-grid small { display:block; font-size:11px; color:var(--muted); }
+.workspace-label { font-size:12px; color:var(--muted); }
+.workspace-label small { display:block; margin-top:4px; font:10px/1.5 ui-monospace,monospace; overflow-wrap:anywhere; opacity:.65; }
+footer { border:0; padding:10px 24px 12px; background:var(--bg); }
+.toolbar { max-width:792px; margin-bottom:10px; gap:5px; }
+.pill { border:0; background:transparent; padding:5px 8px; font-size:11px; }
+.pill:hover { background:var(--bubble); }
+.composer { max-width:792px; border:1px solid var(--border); border-radius:24px; background:var(--panel); padding:10px 12px; box-shadow:0 3px 20px #00000006; align-items:flex-end; }
+.composer:focus-within { border-color:var(--muted); }
+textarea#input { background:transparent; padding:9px 6px; font-size:14px; }
+#send { border-radius:50%; background:var(--accent); color:var(--on-accent); width:36px; height:36px; margin-bottom:2px; }
+#send:disabled { opacity:.25; }
+.attach-btn { margin-bottom:1px; }
+.composer-note { text-align:center; font-size:10px; color:var(--muted); margin-top:10px; }
+.composer-note span { padding:0 8px; }
+.btn.primary { color:var(--on-accent); background:var(--accent); border-color:var(--accent); }
+.msg-user .wrap > div.txt { border-radius:20px; padding:12px 18px; }
+.turn { margin:20px 0 34px; }
+.turn > .md { line-height:1.85; }
+details.tool, details.thinking { border-radius:12px; font-size:12px; }
+.code { border-radius:12px; }
+.code-h { padding:8px 12px; }
+.sheet { box-shadow:0 16px 80px #0003; border:1px solid var(--border); }
+.approval-card { margin:16px 0; border:1px solid var(--muted); background:var(--panel); border-radius:14px; padding:18px; }
+.approval-card pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; max-height:200px; overflow:auto; }
+.approval-card label { display:block; margin:12px 0 6px; }
+.approval-card input { width:100%; border:1px solid var(--border); background:var(--bg); padding:10px; border-radius:8px; }
+.approval-actions, .approval-options { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+.approval-actions { justify-content:flex-end; }
+.drop-hint { background:#8882; }
+[hidden] { display:none !important; }
+@media (min-width:1100px) {
+  .drawer { width:260px; transform:none; z-index:12; }
+  header, main, footer { margin-left:260px; }
+  #menuBtn { display:none; }
+  .jump { margin-left:130px; }
+}
+@media (max-width:600px) {
+  header { height:62px; padding:8px 12px; }
+  .chat { padding:20px 16px 30px; }
+  footer { padding:8px 12px max(10px,env(safe-area-inset-bottom)); }
+  .starter-grid { gap:8px; margin-top:26px; }
+  .starter-grid button { padding:12px 9px; border-radius:12px; }
+  .starter-grid small { font-size:10px; }
+  .empty { margin-top:6vh; }
+  .composer-note { font-size:9px; }
+}
 </style>
 </head>
 <body>
@@ -312,7 +390,7 @@ textarea {
     <div><small>当前项目</small><b id="projName">…</b><span id="projPath"></span></div>
     <button class="btn" id="switchProj">切换</button>
   </div>
-  <button class="new-btn" id="memBtn">🧠 记忆 / CLAUDE.md</button>
+  <button class="new-btn" id="memBtn">◇ 记忆 / AGENTS.md</button>
   <button class="new-btn" id="drawerNew" style="margin-top:6px">＋ 新对话</button>
   <h3>本项目的历史会话</h3>
   <div class="sessions" id="sessions"></div>
@@ -341,6 +419,7 @@ textarea {
 <div class="viewer" id="viewer"><img alt=""></div>
 <div class="drop-hint" id="dropHint">松开以上传文件</div>
 <input type="file" id="fileInput" multiple hidden>
+<input type="file" id="presetInput" accept=".json,application/json" hidden>
 
 <div class="modal" id="memModal">
   <div class="sheet" style="height:85dvh">
@@ -371,7 +450,7 @@ textarea {
 <div class="modal" id="psModal">
   <div class="sheet">
     <div class="sheet-h"><b>预设编辑</b><button class="icon-btn" id="psClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-    <div style="padding:6px 12px;color:var(--dim);font-size:13px">勾选=启用该模块，选角色，改名，点「内容」改正文，✕删除，＋新增。保存后，选中的预设会替换系统提示词并伪装 assistant，对每条消息生效（不用再写 CLAUDE.md）。</div>
+    <div style="padding:6px 12px;color:var(--muted);font-size:13px">勾选=启用该模块，选角色，改名，点「内容」改正文，✕删除，＋新增。系统部分替换内置指令，下一次发送生效；user / assistant 示例仅在新会话注入一次。关闭预设不会删除已有示例。</div>
     <div class="sheet-body" id="psList" style="min-height:0"></div>
     <div class="sheet-f"><button class="btn" id="psAdd" style="flex:0 0 auto">＋ 新增条目</button><button class="btn primary" id="psSave">保存</button></div>
   </div>
@@ -387,7 +466,7 @@ textarea {
 
 <button class="jump" id="jumpBtn" aria-label="回到底部">↓</button>
 <footer>
-  <div class="edit-bar" id="editBar" hidden><span>✎ 正在编辑之前的消息：发送后从这条消息重新开始，后面的对话会被删除（Claude 改过的文件不会还原）</span><button class="btn" id="editCancel">取消</button></div>
+  <div class="edit-bar" id="editBar" hidden><span>✎ 正在编辑之前的消息：发送后从这条消息重新开始，后面的对话会被删除（Codex 改过的文件不会还原）</span><button class="btn" id="editCancel">取消</button></div>
   <div class="cmd-menu" id="cmdMenu" hidden></div>
   <div class="toolbar">
     <button class="pill" id="cmdPill"><b>/</b> 指令</button>
@@ -402,11 +481,12 @@ textarea {
     <button class="attach-btn" id="attachBtn" aria-label="上传图片或文件">
       <svg viewBox="0 0 24 24"><path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg>
     </button>
-    <textarea id="input" rows="1" placeholder="给 Claude 发消息…"></textarea>
+    <textarea id="input" rows="1" placeholder="向 Codex 描述你的想法…"></textarea>
     <button id="send" aria-label="发送" disabled>
       <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
     </button>
   </div>
+  <div class="composer-note">Codex 在你的电脑上工作 <span>·</span> Ctrl / ⌘ + Enter 发送</div>
 </footer>
 <div class="toast" id="toast"></div>
 
@@ -418,8 +498,8 @@ const SEND_ICON = '<svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></s
 const STOP_ICON = '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>';
 
 const store = {
-  get(k, d) { try { const v = localStorage.getItem('cw:' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem('cw:' + k, JSON.stringify(v)); } catch {} },
+  get(k, d) { try { const v = localStorage.getItem('codex-web:' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('codex-web:' + k, JSON.stringify(v)); } catch {} },
 };
 
 const S = {
@@ -580,7 +660,8 @@ function fmtTime(ms) {
 
 // ================= 渲染 =================
 function showEmpty() {
-  chat.innerHTML = `<div class="empty"><div class="logo">✻</div><p><b>${esc(baseName(S.cwd))}</b></p><p>${esc(S.cwd)}</p><p style="margin-top:14px">发一条消息开始和 Claude Code 对话</p></div>`;
+  chat.innerHTML = `<div class="empty"><div class="logo" aria-hidden="true">&gt;_</div><span class="eyebrow">CODEX / LOCAL WORKSPACE</span><h1>想一起做点什么？</h1><p>从一个想法，到可以运行的作品。</p><div class="starter-grid"><button data-starter="先阅读这个项目，说明结构和运行方式">◇<b>了解项目</b><small>梳理结构与运行方式</small></button><button data-starter="检查当前项目的问题，给出修改建议，先不要改文件">⌕<b>检查代码</b><small>定位问题，讨论改进</small></button><button data-starter="我想做一个新功能，请先帮我分析实现方案">＋<b>实现想法</b><small>从需求开始，一步步完成</small></button></div><div class="workspace-label">${esc(baseName(S.cwd))}<small>${esc(S.cwd)}</small></div></div>`;
+  chat.querySelectorAll('[data-starter]').forEach(b => { b.onclick = () => { input.value = b.dataset.starter; autosize(); updateSendState(); input.focus(); }; });
 }
 function addUser(text, images, files, uuid) {
   chat.querySelector('.empty')?.remove();
@@ -642,7 +723,7 @@ function scheduleRender(d) {
   });
 }
 function addThinking(text) {
-  const d = el('details', 'thinking', '<summary>✻ 思考过程</summary><div class="tb"></div>');
+  const d = el('details', 'thinking', '<summary>✻ 思考摘要</summary><div class="tb"></div>');
   d._kind = 'thinking'; d._text = text || ''; d.querySelector('.tb').textContent = d._text;
   ensureTurn().appendChild(d); return d;
 }
@@ -709,82 +790,82 @@ function notice(text, err) { const n = el('div', 'notice' + (err ? ' err' : ''))
 function finishStreamingText() { S.turn?.querySelectorAll('.cursor').forEach((x) => x.classList.remove('cursor')); }
 
 function handle(ev) {
-  if (ev.parent_tool_use_id) return; // 子代理内部的消息不展开
-  switch (ev.type) {
-    case 'system':
-      if (ev.subtype === 'init' && ev.session_id) { setSession(ev.session_id); S.lastModel = ev.model || ''; }
-      else if (ev.subtype === 'compact_boundary') notice('— 上下文已压缩 —');
-      return;
-    case 'stream_event': return handleStream(ev.event);
-    case 'assistant': {
-      const m = ev.message || {};
-      if (m.id && S.seenMsgs.has(m.id)) return; // 已经通过流式渲染过了
-      for (const b of m.content || []) {
-        if (b.type === 'text') addText(b.text);
-        else if (b.type === 'thinking') addThinking(b.thinking);
-        else if (b.type === 'tool_use') addTool(b.id, b.name, b.input);
+  if (ev.type === 'session') { setSession(ev.sessionId); S.lastModel = ev.model || ''; return; }
+  if (ev.type === 'approval') return renderApproval(ev);
+  if (ev.type === 'approval_resolved') return resolveApproval(ev.requestId);
+  if (ev.type === 'notice') return notice(ev.message);
+  if (ev.type === 'web_error') return notice(ev.message, true);
+  if (ev.type === 'web_done') { refreshUsage(); return onDone(ev); }
+  if (ev.type !== 'codex') return;
+  const p = ev.params || {}, item = p.item;
+  if (ev.method === 'serverRequest/resolved') return resolveApproval(String(p.requestId));
+  if (ev.method === 'error') return notice(p.error?.message || 'Codex 请求失败', !p.willRetry);
+  if (ev.method === 'turn/started') { S.codexItems = new Map(); return; }
+  if (ev.method === 'turn/completed') {
+    finishStreamingText();
+    const status = { completed: '已完成', interrupted: '已停止', failed: '执行失败' }[p.turn.status] || p.turn.status;
+    ensureTurn().appendChild(el('div', 'meta', esc((S.lastModel || 'Codex') + ' · ' + status)));
+    return;
+  }
+  S.codexItems ||= new Map();
+  if (ev.method === 'item/started' || ev.method === 'item/completed') {
+    const complete = ev.method === 'item/completed';
+    S.turn?.querySelector('.working')?.remove();
+    if (item.type === 'userMessage' || item.type === 'hookPrompt') return;
+    if (item.type === 'contextCompaction') { if (complete) notice('— 上下文已压缩 —'); return; }
+    let d = S.codexItems.get(item.id);
+    if (['agentMessage', 'plan', 'reasoning'].includes(item.type)) {
+      const text = item.type === 'reasoning' ? (item.summary || []).join('\n') : item.text || '';
+      if (!d) { d = item.type === 'reasoning' ? addThinking(text) : addText(text, !complete); S.codexItems.set(item.id, d); }
+      if (complete) { d._text = text; scheduleRender(d); d.classList.remove('cursor'); }
+    } else {
+      const name = ({ commandExecution: '执行命令', fileChange: '修改文件', webSearch: '搜索网页', imageView: '查看图片' })[item.type] || item.tool || item.type;
+      const inp = item.type === 'commandExecution' ? { command: item.command, cwd: item.cwd } : item.type === 'fileChange' ? { changes: item.changes } : item.arguments || { query: item.query, path: item.path };
+      if (!d) { d = addTool(item.id, name, inp); S.codexItems.set(item.id, d); }
+      if (complete) {
+        setToolInput(d, inp);
+        d.querySelector('.live-output')?.remove();
+        setToolResult(item.id, item.aggregatedOutput ?? item.result ?? item.error?.message ?? (item.changes ? item.changes.map(x => x.path + '\n' + (x.diff || '')).join('\n') : item.status || '已完成'), ['failed', 'declined'].includes(item.status) || !!item.error || (item.exitCode != null && item.exitCode !== 0));
       }
-      scrollDown(); return;
     }
-    case 'user': {
-      const c = ev.message && ev.message.content;
-      if (Array.isArray(c)) for (const b of c) if (b.type === 'tool_result') setToolResult(b.tool_use_id, b.content, b.is_error);
-      return;
-    }
-    case 'result': {
-      finishStreamingText();
-      const parts = [];
-      if (ev.duration_ms) parts.push((ev.duration_ms / 1000).toFixed(1) + ' 秒');
-      if (ev.num_turns > 1) parts.push(ev.num_turns + ' 轮');
-      if (S.lastModel) parts.unshift(S.lastModel.replace(/^claude-/, ''));
-      if (ev.total_cost_usd) parts.push('$' + ev.total_cost_usd.toFixed(4));
-      if (ev.is_error || (ev.subtype && ev.subtype !== 'success')) {
-        notice('出错了：' + (ev.result || (ev.errors || []).join('\n') || ev.subtype), true);
-      }
-      if (Array.isArray(ev.permission_denials) && ev.permission_denials.length) {
-        const list = ev.permission_denials.map((p) => '· ' + p.tool_name + ' ' + toolArg(p.tool_name, p.tool_input).split('\n')[0].slice(0, 80)).join('\n');
-        notice('以下操作因权限模式被拒绝（可在右上角设置里切换权限模式后让 Claude 重试）：\n' + list);
-      }
-      if (parts.length) ensureTurn().appendChild(el('div', 'meta', '✓ ' + esc(parts.join(' · '))));
-      scrollDown(); return;
-    }
-    case 'web_error': return notice(ev.message, true);
-    case 'web_done': refreshUsage(); return onDone(ev);
+    scrollDown(); return;
+  }
+  if (['item/agentMessage/delta', 'item/plan/delta', 'item/reasoning/summaryTextDelta'].includes(ev.method)) {
+    let d = S.codexItems.get(p.itemId);
+    if (!d) { d = ev.method.includes('reasoning') ? addThinking('') : addText('', true); S.codexItems.set(p.itemId, d); }
+    d._text += p.delta; scheduleRender(d);
+  } else if (ev.method === 'item/commandExecution/outputDelta') {
+    const d = S.codexItems.get(p.itemId);
+    if (d) { let out = d.querySelector('.live-output'); if (!out) { out = el('pre', 'tout live-output'); d.querySelector('.tbody').append(out); } out.textContent = (out.textContent + p.delta).slice(-8000); }
   }
 }
-function handleStream(e) {
-  if (!e) return;
-  switch (e.type) {
-    case 'message_start':
-      if (e.message && e.message.id) S.seenMsgs.add(e.message.id);
-      S.blocks = {}; return;
-    case 'content_block_start': {
-      const b = e.content_block || {};
-      S.turn?.querySelector('.working')?.remove();
-      if (b.type === 'text') S.blocks[e.index] = addText(b.text || '', true);
-      else if (b.type === 'thinking') S.blocks[e.index] = addThinking(b.thinking || '');
-      else if (b.type === 'tool_use' || b.type === 'server_tool_use') S.blocks[e.index] = addTool(b.id, b.name, null);
-      scrollDown(); return;
-    }
-    case 'content_block_delta': {
-      const d = S.blocks[e.index], dl = e.delta || {};
-      if (!d) return;
-      if (dl.type === 'text_delta') { d._text += dl.text; scheduleRender(d); }
-      else if (dl.type === 'thinking_delta') { d._text += dl.thinking; scheduleRender(d); }
-      else if (dl.type === 'input_json_delta') {
-        d._json += dl.partial_json;
-        const m = d._json.match(/"(?:command|file_path|pattern|url|query|description)"\s*:\s*"((?:[^"\\]|\\.)*)/);
-        if (m) d.querySelector('.targ').textContent = m[1].replace(/\\n/g, ' ').replace(/\\(.)/g, '$1');
-      }
-      return;
-    }
-    case 'content_block_stop': {
-      const d = S.blocks[e.index]; if (!d) return;
-      d.classList.remove('cursor');
-      if (d._name !== undefined && d._json) { try { setToolInput(d, JSON.parse(d._json)); } catch {} }
-      return;
-    }
+const approvals = new Map();
+function resolveApproval(id) { const d = approvals.get(id); if (d) { d.remove(); approvals.delete(id); } }
+function renderApproval(ev) {
+  if (approvals.has(ev.requestId)) return;
+  const p = ev.params, box = el('section', 'approval-card');
+  const title = el('b'); title.textContent = ev.method === 'item/tool/requestUserInput' ? 'Codex 需要你的回答' : '需要你的授权';
+  const detail = el('pre'); detail.textContent = [p.reason, p.command, p.cwd ? '工作目录：' + p.cwd : '', p.grantRoot ? '授权目录：' + p.grantRoot : '', p.permissions ? JSON.stringify(p.permissions, null, 2) : '', p.networkApprovalContext ? JSON.stringify(p.networkApprovalContext, null, 2) : '', p.changes ? JSON.stringify(p.changes, null, 2) : ''].filter(Boolean).join('\n') || '请确认是否允许此次操作';
+  box.append(title, detail);
+  const fields = new Map();
+  for (const question of p.questions || []) {
+    const label = el('label'); label.textContent = question.question || question.header;
+    const field = el('input'); field.type = question.isSecret ? 'password' : 'text'; field.autocomplete = 'off';
+    box.append(label);
+    if (question.options?.length) { const options = el('div', 'approval-options'); for (const option of question.options) { const b = el('button', 'btn'); b.textContent = option.label; b.title = option.description || ''; b.onclick = () => { field.value = option.label; }; options.append(b); } box.append(options); }
+    box.append(field); fields.set(question.id, field);
   }
+  const actions = el('div', 'approval-actions');
+  for (const accept of ev.method === 'item/tool/requestUserInput' ? [true] : [false, true]) {
+    const b = el('button', 'btn' + (accept ? ' primary' : '')); b.textContent = fields.size ? '提交回答' : accept ? '允许这一次' : '拒绝';
+    b.onclick = async () => {
+      b.disabled = true;
+      try { await getJSON('/api/respond', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: S.runId, requestId: ev.requestId, accept, answers: Object.fromEntries([...fields].map(([id, f]) => [id, f.value])) }) }); resolveApproval(ev.requestId); }
+      catch (e) { toast(e.message); b.disabled = false; }
+    };
+    actions.append(b);
+  }
+  box.append(actions); approvals.set(ev.requestId, box); ensureTurn().append(box); scrollDown();
 }
 
 // ================= 附件 =================
@@ -855,10 +936,9 @@ async function send() {
   const atts = S.pending.splice(0);
   renderChips();
   input.value = ''; autosize(); store.set('draft:' + S.cwd, '');
-  if (cmdName) addCommand(text);
-  else addUser(text, atts.filter((a) => a.preview).map((a) => a.preview), atts.filter((a) => !a.preview));
+  addUser(text, atts.filter((a) => a.preview).map((a) => a.preview), atts.filter((a) => !a.preview));
   newTurn();
-  S.turn.appendChild(el('div', 'working', '<span class="spin"></span>Claude 正在思考…'));
+  S.turn.appendChild(el('div', 'working', '<span class="spin"></span>Codex 正在思考…'));
   stick = true; scrollDown(true);
   setRunning(true);
   const gen = S.gen;
@@ -928,6 +1008,7 @@ function onDone(ev) {
   S.turn?.querySelector('.working')?.remove();
   if (ev.sessionId) setSession(ev.sessionId);
   setRunning(false);
+  for (const id of [...approvals.keys()]) resolveApproval(id);
   S.turn = null;
   loadSessions();
   if (S.afterDone) { const f = S.afterDone; S.afterDone = null; f(); }
@@ -962,7 +1043,7 @@ chat.addEventListener('click', async (e) => {
   let bubble = b.closest('.msg-user');
   const idx = [...chat.querySelectorAll('.msg-user')].indexOf(bubble);
   if (S.running) {
-    if (!confirm('Claude 还在回复，要停止并编辑这条消息吗？')) return;
+    if (!confirm('Codex 还在回复，要停止并编辑这条消息吗？')) return;
     await stopAndWait();
   }
   if (!bubble.dataset.uuid) { await syncUuids(); bubble = chat.querySelectorAll('.msg-user')[idx]; }
@@ -978,12 +1059,12 @@ $('editCancel').onclick = () => { clearEdit(); input.value = ''; autosize(); upd
 
 // ================= 常用指令 =================
 const CMDS = [
-  ['/compact', '压缩上下文', '把之前的对话总结成摘要，腾出上下文空间。可以在后面加要求，如：/compact 保留代码细节', true],
+  ['/compact', '压缩上下文', '把之前的对话总结成摘要，腾出上下文空间。直接发送 /compact 即可'],
   ['/context', '上下文占用', '查看当前对话用了多少 token'],
   ['/cost', '用量统计', '订阅额度，以及最近用量主要花在哪里'],
-  ['/init', '生成 CLAUDE.md', '让 Claude 分析项目并写一份 CLAUDE.md'],
+  ['/init', '生成 AGENTS.md', '让 Codex 分析项目并写一份 AGENTS.md'],
   ['/clear', '新对话', '开始一个新对话'],
-  ['/memory', '记忆', '打开记忆 / CLAUDE.md 面板'],
+  ['/memory', '记忆', '打开记忆 / AGENTS.md 面板'],
   ['/model', '切换模型', '打开模型选择'],
   ['/effort', '思考强度', '打开 effort 选择'],
   ['/usage', '用量面板', '查看 5 小时 / 每周额度'],
@@ -1080,7 +1161,7 @@ $('titleText').onclick = () => {
 $('titleText').style.cursor = 'pointer';
 
 async function deleteSession(s) {
-  if (!confirm(`确定删除会话「${s.title.slice(0, 40)}」吗？\n删除后无法恢复，终端里的 claude --resume 也看不到它了。`)) return;
+  if (!confirm(`确定删除会话「${s.title.slice(0, 40)}」吗？\n删除后无法恢复，终端里的 codex resume 也看不到它了。`)) return;
   try {
     await getJSON('/api/session' + q({ id: s.id }), { method: 'DELETE' });
     toast('已删除');
@@ -1088,7 +1169,7 @@ async function deleteSession(s) {
     loadSessions();
   } catch (e) { toast(e.message); }
 }
-function resetView() { clearEdit(); chat.innerHTML = ''; S.turn = null; S.blocks = {}; S.cards.clear(); S.seenMsgs.clear(); }
+function resetView() { approvals.clear(); S.codexItems = new Map(); clearEdit(); chat.innerHTML = ''; S.turn = null; S.blocks = {}; S.cards.clear(); S.seenMsgs.clear(); }
 async function openSession(id) {
   const cwd = S.cwd;
   let items = [];
@@ -1127,7 +1208,7 @@ async function loadProject(cwd) {
   $('cwdText').textContent = info.cwd;
   $('projName').textContent = info.name;
   $('projPath').textContent = info.cwd;
-  document.title = info.name + ' · Claude';
+  document.title = info.name + ' · Codex';
   input.value = store.get('draft:' + S.cwd, ''); autosize(); updateSendState();
   S.sessionId = null; S.sessions = [];
   await loadSessions();
@@ -1254,8 +1335,8 @@ async function loadMemList() {
   let r;
   try { r = await getJSON('/api/memory?' + new URLSearchParams({ cwd: MEM.cwd })); } catch (e) { box.textContent = e.message; return; }
   box.innerHTML = '';
-  box.appendChild(el('div', 'mem-sec', '自动记忆（Claude 自己记下的，会话开始时读取 MEMORY.md）'));
-  if (!r.memory.length) box.appendChild(el('div', 'mem-hint', '这个项目还没有记忆。可以点下方「新建记忆」，或在对话里让 Claude “记住……”。'));
+  box.appendChild(el('div', 'mem-sec', '项目补充记忆（网页会提示 Codex 按需读取 MEMORY.md）'));
+  if (!r.memory.length) box.appendChild(el('div', 'mem-hint', '这个项目还没有记忆。可以点下方「新建记忆」，或在对话里让 Codex “记住……”。'));
   for (const f of r.memory) {
     const b = el('button', 'item', `<span class="ic">${f.name === 'MEMORY.md' ? '📇' : '📝'}</span><span class="tx"><b></b><small></small></span>`);
     b.querySelector('b').textContent = f.name === 'MEMORY.md' ? 'MEMORY.md（索引）' : f.name.replace(/\.md$/, '');
@@ -1263,8 +1344,8 @@ async function loadMemList() {
     b.onclick = () => openMemFile(f.path, f.name, false);
     box.appendChild(b);
   }
-  box.appendChild(el('div', 'mem-sec', 'CLAUDE.md（你写给 Claude 的长期说明）'));
-  for (const c of r.claude) {
+  box.appendChild(el('div', 'mem-sec', 'AGENTS.md（你写给 Codex 的长期说明）'));
+  for (const c of r.codex) {
     const b = el('button', 'item' + (c.exists ? '' : ' missing'), `<span class="ic">📄</span><span class="tx"><b></b><small></small></span>`);
     b.querySelector('b').textContent = c.label;
     b.querySelector('small').textContent = c.exists ? `${c.desc} · ${fmtTime(c.mtime)}` : `${c.desc}（还没有，点击创建）`;
@@ -1347,50 +1428,22 @@ chat.addEventListener('click', async (e) => {
 });
 
 // ================= 模型 / effort / 权限 / 用量 =================
-// 模型列表来自 Claude Code 2.1.294 内置的模型表；老模型账号不一定能用，用不了会在回复里报错
-const M = (id, name, note) => [id, name, id + (note ? ' · ' + note : '')];
-const MODELS = [
-  ['', '默认', '跟随 Claude Code 的设置（~/.claude/settings.json）'],
-  ['#', 'Fable'],
-  M('claude-fable-5-1', 'Fable 5.1', '最新'),
-  ['#', 'Opus'],
-  M('claude-opus-5-5', 'Opus 5.5', '最新'),
-  M('claude-opus-4-8', 'Opus 4.8'),
-  M('claude-opus-4-7', 'Opus 4.7'),
-  M('claude-opus-4-6', 'Opus 4.6'),
-  M('claude-opus-4-5', 'Opus 4.5'),
-  ['#', 'Sonnet'],
-  M('claude-sonnet-5-5', 'Sonnet 5.5', '最新'),
-  M('claude-sonnet-4-6', 'Sonnet 4.6'),
-  M('claude-sonnet-4-5', 'Sonnet 4.5'),
-  ['#', 'Haiku'],
-  M('claude-haiku-5-5', 'Haiku 5.5', '最新'),
-  M('claude-haiku-4-5', 'Haiku 4.5'),
-  ['#', '其他'],
-  ['__custom', '自定义…', '手动输入模型名'],
-];
-const EFFORTS = [
-  ['', '默认', '跟随 Claude Code 的设置'],
-  ['low', 'low', '思考最少，最快、最省额度'],
-  ['medium', 'medium', '适中'],
-  ['high', 'high', '更深入的思考'],
-  ['xhigh', 'xhigh', '很深入，较慢'],
-  ['max', 'max', '最大思考量，最慢、最耗额度'],
-];
+// 模型和思考强度动态查询本机 Codex。
+let modelCatalog = [];
+let MODELS = [['', '默认模型', '使用 Codex 当前配置'], ['__custom', '自定义模型…', '输入完整模型名称']];
+const EFFORTS = [['', '默认', '使用模型默认思考强度']];
 const PERMS = [
-  ['acceptEdits', '改文件', 'acceptEdits：自动允许修改文件，执行命令等会被拒绝'],
-  ['auto', '自动', 'auto：由 Claude 自动判断是否安全'],
-  ['bypassPermissions', '全部允许', 'bypassPermissions：任何操作都直接执行（已自动解除 root 限制）'],
-  ['plan', '只规划', 'plan：只读，不改任何东西'],
-  ['default', '严格', 'default：需要确认的操作一律拒绝'],
+  ['workspace', '工作目录', '可修改项目文件，额外权限会在网页中询问'],
+  ['readOnly', '只读', '用于分析和规划，额外权限仍需你确认'],
+  ['full', '完全访问', '可访问本机文件和网络，不再逐次确认'],
 ];
-const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), preset: store.get('preset', '') };
-const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
+const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'workspace'), preset: store.get('preset', '') };
+const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^codex-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
   $('effortPill').querySelector('b').textContent = prefs.effort || '默认';
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
-  $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
+  $('permPill').classList.toggle('warn', prefs.perm === 'full');
   $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
   $('presetPill').classList.toggle('warn', !!prefs.preset);
 }
@@ -1402,7 +1455,7 @@ function setPref(k, v) {
 getJSON('/api/prefs').then((p) => {
   // 服务端还没有记录：把这个浏览器里原有的选择存上去
   if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
-  for (const k of ['model', 'effort', 'perm']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  for (const k of ['model', 'effort', 'perm', 'preset']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
   renderPills();
 }).catch(() => {});
 
@@ -1424,31 +1477,59 @@ function pick(title, list, cur, onPick) {
 }
 $('pickModal').onclick = (e) => { if (e.target === $('pickModal') || e.target.closest('[data-close]')) $('pickModal').classList.remove('show'); };
 $('modelPill').onclick = () => pick('选择模型', MODELS, prefs.model, (v) => {
-  if (v !== '__custom') return setPref('model', v);
-  const name = prompt('输入模型名称（完整名如 claude-opus-5-5，或别名 opus / sonnet / haiku / fable）：', prefs.model);
+  if (v !== '__custom') { setPref('model', v); return setPref('effort', ''); }
+  const name = prompt('输入模型名称（完整名以当前 Codex 支持的名称为准）：', prefs.model);
   if (name != null) setPref('model', name.trim());
 });
-$('effortPill').onclick = () => pick('思考强度（effort）', EFFORTS, prefs.effort, (v) => setPref('effort', v));
+$('effortPill').onclick = () => {
+  const selected = modelCatalog.find(x => x.model === prefs.model) || modelCatalog.find(x => x.isDefault);
+  const options = selected ? [['', '默认', '由 Codex 决定'], ...(selected.supportedReasoningEfforts || []).map(x => [x.reasoningEffort, x.reasoningEffort, x.description || ''])] : EFFORTS;
+  pick('思考强度', options, prefs.effort, v => setPref('effort', v));
+};
+getJSON('/api/models').then(models => { modelCatalog = models; MODELS = [['', '默认模型', '使用 Codex 当前配置'], ...models.filter(x => !x.hidden).map(x => [x.model, x.displayName || x.model, x.description || '']), ['__custom', '自定义模型…', '输入完整模型名称']]; renderPills(); }).catch(e => toast('模型列表获取失败：' + e.message));
 $('permPill').onclick = () => pick('权限模式', PERMS, prefs.perm, (v) => setPref('perm', v));
-// 写作模式：开启后把破限头作为系统级指令注入（见 server.js 的 writing-head.txt）。仅存本浏览器。
 // 预设选择
 $('presetPill').onclick = async () => {
   let list = []; try { list = await getJSON('/api/presets'); } catch {}
   const opts = list.map((p) => [p.file, p.name, '']);
   opts.push(['__none', '（不用预设）', '不替换系统提示词，普通 agent']);
   opts.push(['__new', '＋ 新建空白预设', '']);
+  opts.push(['__import', '↑ 导入 ST 预设', '选择本机 JSON 文件']);
+  if (prefs.preset) opts.push(['__export', '↓ 导出当前预设', '保存 JSON 文件']);
   if (list.length) opts.push(['__edit', '✎ 编辑当前预设…', '']);
   if (prefs.preset) opts.push(['__del', '🗑 删除当前预设', prefs.preset]);
   pick('选择预设', opts, prefs.preset || '__none', (v) => {
     if (v === '__new') return createBlankPreset();
+    if (v === '__import') return $('presetInput').click();
+    if (v === '__export') return exportPreset();
     if (v === '__edit') return openPsEditor(prefs.preset || (list[0] && list[0].file));
     if (v === '__del') return deletePreset(prefs.preset);
-    prefs.preset = v === '__none' ? '' : v; store.set('preset', prefs.preset); renderPills();
+    setPref('preset', v === '__none' ? '' : v);
   });
+};
+async function exportPreset() {
+  try {
+    const data = await getJSON('/api/preset?file=' + encodeURIComponent(prefs.preset));
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = prefs.preset; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) { toast(e.message); }
+}
+$('presetInput').onchange = async e => {
+  const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+  try {
+    if (file.size > 5e6) throw new Error('预设文件不能超过 5MB');
+    const data = JSON.parse(await file.text());
+    const name = file.name.replace(/[^\w一-龥.\-]/g, '_').replace(/\.json$/i, '') + '.json';
+    const exists = (await getJSON('/api/presets')).some(p => p.file === name);
+    if (exists && !confirm('同名预设已经存在，要覆盖吗？')) return;
+    await getJSON('/api/preset', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: name, data }) });
+    setPref('preset', name); toast('预设已导入，下次发送生效'); openPsEditor(name);
+  } catch (e) { toast('导入失败：' + e.message); }
 };
 async function deletePreset(file) {
   if (!file || !confirm('删除预设「' + file.replace(/\.json$/, '') + '」？不可恢复')) return;
-  try { await getJSON('/api/preset?file=' + encodeURIComponent(file), { method: 'DELETE' }); prefs.preset = ''; store.set('preset', ''); renderPills(); notice('预设已删除'); }
+  try { await getJSON('/api/preset?file=' + encodeURIComponent(file), { method: 'DELETE' }); setPref('preset', ''); notice('预设已删除'); }
   catch { notice('删除失败', true); }
 }
 async function createBlankPreset() {
@@ -1459,7 +1540,7 @@ async function createBlankPreset() {
     prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }] };
   try {
     await getJSON('/api/preset', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file, data }) });
-    prefs.preset = file; store.set('preset', file); renderPills();
+    setPref('preset', file);
     openPsEditor(file);
   } catch { notice('新建失败', true); }
 }
@@ -1483,11 +1564,12 @@ function renderPsEditor() {
   const box = $('psList'); box.innerHTML = '';
   order.forEach((it) => {
     const p = byId[it.identifier] || (byId[it.identifier] = { identifier: it.identifier, name: it.identifier, role: 'system', content: '' });
+    if (!(d.prompts || []).includes(p)) d.prompts.push(p);
     const row = el('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 4px;border-bottom:1px solid var(--border)';
     const grip = el('span'); grip.textContent = '⠿'; grip.draggable = true; grip.title = '拖动排序';
     grip.style.cssText = 'flex:0 0 auto;cursor:grab;color:var(--dim);user-select:none;padding:0 2px';
     grip.ondragstart = (e) => { PS._drag = it; e.dataTransfer.effectAllowed = 'move'; };
-    row.ondragover = (e) => { e.preventDefault(); row.style.borderTop = '2px solid #4af'; };
+    row.ondragover = (e) => { e.preventDefault(); row.style.borderTop = '2px solid var(--accent)'; };
     row.ondragleave = () => { row.style.borderTop = ''; };
     row.ondrop = (e) => { e.preventDefault(); row.style.borderTop = '';
       if (PS._drag && PS._drag !== it) { const from = order.indexOf(PS._drag); if (from >= 0) { order.splice(from, 1); order.splice(order.indexOf(it), 0, PS._drag); renderPsEditor(); } } };
@@ -1546,6 +1628,7 @@ renderPills();
 const barColor = (p) => (p >= 90 ? 'var(--err)' : p >= 70 ? 'var(--accent)' : 'var(--ok)');
 function fmtReset(s) {
   // "Oct 8, 12pm (UTC)" / "Oct 9, 5:30am (UTC)" → 本地时间 + 剩余时长
+  if (s && !/[AP]M|UTC/i.test(s)) return '重置时间：' + s;
   const m = s.match(/([A-Z][a-z]{2})\w*\s+(\d{1,2}),?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i);
   if (!m) return s ? '重置时间：' + s : '';
   const mon = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(m[1].toLowerCase()) / 3;

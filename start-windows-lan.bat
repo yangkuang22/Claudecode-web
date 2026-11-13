@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
-title Claude Web（局域网）
-rem 双击运行：开放局域网访问（同一 WiFi 下的手机等设备可用，不需要令牌，网址固定）
+title Codex Web（局域网）
+rem 双击运行：开放局域网访问，使用终端打印的带令牌网址
 where node >nul 2>nul
 if errorlevel 1 (
   echo.
@@ -10,5 +10,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-node "%~dp0server.js" --cwd "%USERPROFILE%" --lan --no-token %*
+node "%~dp0server.js" --cwd "%USERPROFILE%" --lan %*
 pause

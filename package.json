@@ -1,18 +1,30 @@
 {
-  "name": "claude-web",
-  "version": "1.0.0",
-  "description": "零依赖的 Claude Code 网页聊天前端，支持 Windows / macOS / Linux / Android Termux",
+  "name": "codex-local-web",
+  "version": "2.0.0",
+  "description": "零依赖的本地 Codex 网页工作空间，支持 ST 预设、指令替换和 assistant 历史",
   "bin": {
-    "claude-web": "server.js"
+    "codex-web": "server.js"
   },
   "files": [
     "server.js",
+    "codex-client.js",
+    "codex-backend.js",
+    "presets.js",
     "index.html",
-    "bin/"
+    "bin/",
+    "examples/",
+    "scripts/",
+    "start-windows.bat",
+    "start-windows-lan.bat"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
-  "keywords": ["claude", "claude-code", "web-ui", "termux"],
+  "scripts": {
+    "start": "node server.js",
+    "check": "node scripts/check.js",
+    "test": "node --test"
+  },
+  "keywords": ["codex", "openai", "web-ui", "presets"],
   "license": "MIT"
 }

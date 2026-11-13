@@ -1,122 +1,117 @@
-# Claude Web
+# Codex Web
 
-给 [Claude Code](https://docs.claude.com/claude-code) 终端版套一个网页聊天界面。不用再对着终端打字，用浏览器（手机、电脑都行）就能和 Claude Code 对话。
+给本机 Codex CLI 配一个黑白风格的网页工作空间。直接使用已登录的 `codex`，在电脑或同一局域网的手机上聊天、操作项目。零 npm 运行时依赖，不需要构建或 CDN。
 
-- **零依赖**：只要 Node.js，不用 `npm install` 任何包，没有需要编译的原生模块，所以在 Android Termux / proot 里也能直接跑
-- **跨平台**：Windows、macOS、Linux、Android（Termux + proot-distro）
-- **用你自己的 Claude Code**：直接调用本机已登录的 `claude` 命令，会话记录和终端版互通（`claude --resume` 能看到网页里的对话，反之亦然）
+从 [Claude Web](https://github.com/yangkuang22/Claudecode-web) 改造，Codex 版在 **`codex-web` 分支**，原 Claude 版保留在 `main`。
+
+## 快速启动
+
+需要 Node.js 20+、Git，以及已经安装并登录的 Codex CLI。本次使用 **Codex 0.168.0** 开发并测试；旧版本可能缺少历史注入、分页或回溯接口，建议更新。
+
+```sh
+npm install -g @openai/codex
+codex login
+git clone --branch codex-web https://github.com/yangkuang22/Claudecode-web.git codex-web
+cd codex-web
+node server.js
+```
+
+无需运行 `npm install` 安装项目依赖。Windows 可直接双击 **`start-windows.bat`**，默认打开 `http://127.0.0.1:8766`，网页里可切换项目。双击 `start-windows-lan.bat` 允许同一 WiFi 的手机访问，并启用令牌；请使用终端打印的完整网址。
+
+也可以安装成命令：
+
+```sh
+npm install -g github:yangkuang22/Claudecode-web#codex-web
+cd 你的项目
+codex-web
+```
 
 ## 功能
 
-| 功能 | 说明 |
+| 功能 | 行为 |
 |---|---|
-| 流式聊天 | 逐字输出，Markdown / 表格 / 代码块（一键复制），工具调用折叠卡片，思考过程 |
-| 智能滚动 | 往上滑就停止自动跟随，方便边出字边阅读；点 ↓ 或滑回底部恢复 |
-| 断线续传 | 手机锁屏、切后台不会中断，回来自动接上 |
-| 项目切换 | 网页里浏览任意文件夹打开项目，支持新建文件夹；多个项目可同时运行 |
-| 会话管理 | 历史会话列表，重命名（与 `/rename` 互通）、删除 |
-| 编辑重发 | 点消息下的「✎ 编辑」，从那条消息重新开始（回溯对话，原记录自动备份） |
-| 图片 / 文件 | 拍照、相册、粘贴、拖拽上传；图片直接给 Claude 看，其他文件告诉 Claude 路径 |
-| 模型 / effort | 一键切换具体模型（Fable 5.1、Opus 5.5、Opus 4.8……）和思考强度 |
-| 权限模式 | acceptEdits / auto / bypassPermissions / plan / default 一键切换 |
-| 用量 | 显示订阅的 5 小时窗口和每周额度、重置时间（查询不消耗额度） |
-| 常用指令 | 输入 `/` 弹出菜单：`/compact` `/context` `/cost` `/init` 等 |
-| 记忆编辑 | 查看、编辑、新建每个项目的自动记忆（memory）和 CLAUDE.md |
+| 黑白界面 | 跟随系统明暗主题，桌面常驻侧栏，手机抽屉 |
+| 流式聊天 | Markdown、代码复制、命令输出、文件变更和思考摘要 |
+| 断线续传 | 浏览器断开不停止任务，重连后按事件序号补齐 |
+| 会话管理 | 读取 CLI 会话、重命名、删除、编辑重发，浏览目录切换项目 |
+| ST 预设 | JSON 导入、导出、新建、编辑、启停、拖动排序 |
+| 基础指令替换 | 使用 `baseInstructions`，关闭预设后恢复本机默认指令 |
+| assistant 示例 | 真实 assistant 历史消息，新会话只注入一次，网页隐藏示例 |
+| 模型与强度 | 动态查询本机 Codex 的模型和 effort |
+| 图片与文件 | 拖拽、粘贴、拍照上传；图片作为视觉输入，其他文件提供本机路径 |
+| 权限 | 工作目录、只读、完全访问；网页内授权卡片和模型提问 |
+| 用量 | Codex 实际返回的额度、重置时间；API key 模式可能无订阅额度 |
+| 长期说明 | 编辑项目 `AGENTS.md`、`AGENTS.override.md` 和全局 `AGENTS.md` |
+| 补充记忆 | `.codex/web-memory/`，提示 Codex 按需读取，与原生自动记忆分开 |
 
-## 准备工作
+不同项目可同时运行，同一项目一次处理一条消息。避免 CLI 与网页同时写入同一个会话。
 
-1. 安装 **Node.js 18 或更高版本**：<https://nodejs.org>
-2. 安装 **Claude Code** 并在终端里登录一次（运行 `claude`，按提示登录）：<https://docs.claude.com/claude-code>
+## 预设规则
 
-## 安装和启动
+点击输入框上方「预设」导入 ST JSON，或新建预设；也可以放入安装目录的 `presets/`。`examples/preset.json` 是不含私人内容的示例。
 
-### Windows
+1. 按 `prompt_order` 排序，优先 `character_id: 100001`，只使用启用条目。
+2. 开头连续的 `system` 替换 Codex 基础指令，不作为普通用户消息发送。
+3. `user` / `assistant` 示例通过 `thread/inject_items` 注入，assistant 使用 `output_text`，保留真实角色。
+4. 后续 `system` 按原顺序并入用户文本。最后一个 assistant 后的文本，只放在新会话第一条真实消息前。
+5. Chat History 仍是分隔符，后面的条目移到真实历史之前；未实现 ST 的深度注入、角色卡变量、世界书或完整宏引擎。
 
-**方法一：下载即用（不需要 git）**
+**中途改预设：** 系统部分在下次发送时更新；user/assistant 示例只在新会话注入。关闭预设不会删除已有示例，想清除示例请新建会话。
 
-1. 在本页面点绿色的 **Code → Download ZIP**，解压到任意位置
-2. 双击 `start-windows.bat`（要让同一 WiFi 下的手机也能访问，就双击 `start-windows-lan.bat`）
-3. 浏览器会自动打开 <http://127.0.0.1:8765>
+恢复会话时，Codex 可能保留旧指令历史，并追加明确的 `<model_instructions>` 替换声明，这是原生行为，不承诺从历史中物理抹掉旧文本。基础指令替换也不移除平台约束、权限、工具说明和项目约定。assistant 历史注入不等于半句回答的强制续写。
 
-**方法二：装成全局命令**
+默认基础指令通过一个不调用模型的临时会话获取，读取后立即删除。只读 Codex 元数据，不修改内部会话文件；版本不兼容时显示错误，不静默降级成普通聊天消息。
+
+## 权限与数据
+
+- 默认「工作目录」可修改项目，额外权限在网页确认；「只读」需要明确授权才能扩大权限。
+- 「完全访问」可操作本机文件和网络，不再逐项确认。
+- 默认监听 `127.0.0.1`；`--lan` 默认启用令牌。用于本机或可信局域网，不作为公网多人托管服务。
+- 会话由本机 Codex 管理，通常位于 `~/.codex/`，可通过 `CODEX_HOME` 修改。
+- 上传、网页设置、指令快照、预设显示记录和编辑备份在 `~/.codex-web/`，与原 Claude Web 分开。
+- 编辑重发只回溯对话，不还原文件；回溯前保存 JSON 备份。旧版 legacy 会话可继续，但不支持网页回溯，请新建会话。
+- 刷新、锁屏不停止任务；重启 Node 服务会终止任务并清空内存断点缓存，已保存会话仍可恢复。
+
+## 参数与命令
+
+```sh
+node server.js --cwd /绝对路径 --port 8766 --no-open
+node server.js --lan
+```
+
+| 配置 | 说明 |
+|---|---|
+| `--cwd` | 初始项目，默认当前目录 |
+| `--port` | 默认 8766 |
+| `--lan` | 开放局域网并启用令牌 |
+| `--no-token` | 显式关闭局域网令牌，仅适合可信网络 |
+| `--open` / `--no-open` | 开启 / 关闭自动打开浏览器 |
+| `CODEX_BIN` | Codex 路径，Windows 支持 `.exe` 和官方 npm 安装器 |
+| `CODEX_WEB_DATA` | 网页数据目录 |
+| `CODEX_HOME` | Codex 的配置和会话目录 |
+
+支持 `/compact`（不带参数）、`/context`、`/cost`、`/init`、`/clear`、`/model`、`/effort`、`/memory`、`/usage`。命令由后端映射到 Codex 接口。
+
+Windows 的 npm 安装器通过 Node 直接启动，消息走标准输入，避免 CMD 二次转义。Linux/macOS 可直接启动；Android 仍需能运行的 Codex CLI，本次未验证 Termux/proot 的 Codex 安装兼容性。
+
+## 开发验证
+
+```sh
+npm run check
+npm test
+```
+
+默认测试覆盖预设角色、顺序、HTTP、附件、跨站拦截和记忆。安装 Codex 后可额外验证真实协议：
 
 ```powershell
-npm install -g github:yangkuang22/Claudecode-web
+$env:CODEX_WEB_INTEGRATION='1'
+npm test
 ```
 
-之后在任意项目文件夹里打开终端，运行 `claude-web` 即可（会自动打开浏览器）。
+Linux/macOS：`CODEX_WEB_INTEGRATION=1 npm test`。
 
-### macOS / Linux
+集成测试使用隔离临时 `CODEX_HOME` 和本地假模型端点，检查真实 Codex 请求，覆盖指令替换、assistant 历史、预设更新和关闭、恢复、编辑与重命名，不消耗模型额度。
 
-```bash
-npm install -g github:yangkuang22/Claudecode-web
-cd 你的项目
-claude-web
-```
+架构：浏览器 → Node HTTP/NDJSON → 本机 `codex app-server` 的 stdio JSON-RPC。
 
-或者克隆后直接运行：`git clone` 本仓库，然后 `node server.js`。
-
-### Android（Termux + proot-distro）
-
-在 proot 的 Linux 里（已装好 Node 和 Claude Code）：
-
-```bash
-git clone https://github.com/yangkuang22/Claudecode-web.git ~/claude-web
-ln -sf ~/claude-web/bin/cw ~/.local/bin/cw   # 确保 ~/.local/bin 在 PATH 里
-cd 你的项目 && cw
-```
-
-更新到最新版：`cd ~/claude-web && git pull`，然后重启 `cw`。
-
-如果以前是把 `server.js` / `index.html` 手动拷到 `~/.claude-web/` 里运行的，可以换成指向仓库的软链接，以后 `git pull` 就自动生效：
-
-```bash
-ln -sf ~/claude-web/server.js ~/.claude-web/server.js
-ln -sf ~/claude-web/index.html ~/.claude-web/index.html
-```
-
-终端里会打印网址，长按即可在浏览器打开。proot 里调不起安卓浏览器；如果想自动打开，可以在 Termux 那一侧读取 `~/.claude-web/last-url.txt` 再用 `termux-open-url` 打开。
-
-## 命令行参数
-
-| 参数 | 作用 |
-|---|---|
-| `--cwd <目录>` | 初始项目目录（默认是当前目录；网页里随时可以切换） |
-| `--port <端口>` | 端口，默认 `8765`。端口上已经有 Claude Web 在跑时会直接复用 |
-| `--lan` | 允许局域网里的其他设备访问（会启用访问令牌） |
-| `--no-token` | 配合 `--lan`，不启用令牌，网址固定为 `http://局域网IP:端口/`（同一网络的任何人都能打开，只适合自己家里用） |
-| `--open` / `--no-open` | 启动后是否自动打开浏览器（Windows / macOS 默认打开） |
-
-环境变量：`CLAUDE_BIN` 指定 claude 可执行文件路径；`CLAUDE_WEB_DATA` 指定数据目录。
-
-## 关于权限
-
-网页里没法像终端那样逐条弹窗确认，所以需要授权的操作会按你选的**权限模式**自动处理，被拒绝的操作会在回复下方列出来。
-
-- 选 **bypassPermissions（全部允许）** 时，Claude 可以直接执行任何命令、修改任何文件，请确认你信任当前任务
-- 在 Linux 上以 root 运行时（比如 Termux proot），Claude Code 默认不允许 bypassPermissions，本工具会自动设置 `IS_SANDBOX=1` 解除这个限制
-
-## 安全说明
-
-- 默认只监听 `127.0.0.1`，只有本机能访问，不需要令牌
-- 用 `--lan` 开放局域网访问时会启用固定令牌（保存在数据目录的 `token` 文件里），网址里带着它，不要外传
-- **不要**把端口暴露到公网
-
-## 数据存放位置
-
-| 内容 | 位置 |
-|---|---|
-| 会话记录、记忆 | Claude Code 自己的 `~/.claude/projects/`（本工具只读写，不另存） |
-| 上传的文件、编辑回溯前的备份、令牌 | `~/.claude-web/`（Windows 是 `C:\Users\你的用户名\.claude-web\`） |
-
-## 常见问题
-
-**提示找不到 claude？** 先在终端里运行 `claude --version` 确认已安装。装在特殊位置的话，用环境变量 `CLAUDE_BIN` 指定完整路径。
-
-**编辑重发会撤销 Claude 改过的文件吗？** 不会，只回溯对话。建议项目用 git 管理。
-
-**模型列表里的老模型用不了？** 列表来自 Claude Code 内置的模型表，你的账号不一定都能用；用不了时回复里会报错，换一个即可。
-
-## 许可证
-
-MIT
+MIT License。

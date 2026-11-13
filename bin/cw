@@ -1,6 +1,6 @@
 #!/bin/bash
-# cw — 在当前目录启动 Claude Web（Linux / macOS / Termux）
-#   cw              仅本机访问，固定网址 http://127.0.0.1:8765
+# cw — 在当前目录启动 Codex Web（Linux / macOS / Termux）
+#   cw              仅本机访问，固定网址 http://127.0.0.1:8766
 #   cw --lan        允许局域网内其他设备访问（如电脑、平板）
 #   cw --lan --no-token  局域网访问且不要令牌（网址固定，只适合自己家里用）
 #   cw --port 9000  指定端口

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Claude Web — 零依赖的 Claude Code 网页聊天前端（Linux / macOS / Windows / Termux）
-// 用法: node server.js [--port 8765] [--host 127.0.0.1] [--cwd 项目目录] [--lan] [--no-token] [--open | --no-open]
+// Codex Web — 零依赖的 Codex CLI 网页聊天前端（Linux / macOS / Windows / Termux）
+// 用法: node server.js [--port 8766] [--host 127.0.0.1] [--cwd 项目目录] [--lan] [--no-token] [--open | --no-open]
 'use strict';
 const http = require('http');
 const fs = require('fs');
@@ -8,6 +8,8 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { CodexBackend } = require('./codex-backend');
+const { assembleFromST, validatePreset } = require('./presets');
 
 const args = process.argv.slice(2);
 const arg = (name, def) => {
@@ -20,61 +22,12 @@ const START_CWD = path.resolve(arg('cwd', process.cwd()));
 const HOST = flag('lan') ? '0.0.0.0' : arg('host', '127.0.0.1');
 // Windows / macOS 默认启动后自动打开浏览器
 const AUTO_OPEN = flag('open') || (!flag('no-open') && (IS_WIN || process.platform === 'darwin'));
-let PORT = parseInt(arg('port', '8765'), 10);
+let PORT = parseInt(arg('port', '8766'), 10);
 // 运行时数据（上传文件、回溯备份、令牌等）放在用户目录，不混进代码目录
-// 必须是绝对路径：sys 文件路径要传给 claude，claude 的 cwd 和本进程不同
-const DATA_DIR = path.resolve(process.env.CLAUDE_WEB_DATA || path.join(os.homedir(), '.claude-web'));
+// 独立于原 Claude Web 的运行时数据，避免互相覆盖。
+const DATA_DIR = path.resolve(process.env.CODEX_WEB_DATA || path.join(os.homedir(), '.codex-web'));
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-// 找到 claude 可执行文件。Windows 上可能是原生安装的 claude.exe，也可能是 npm 安装的 claude.cmd
-function findClaude() {
-  if (process.env.CLAUDE_BIN) return process.env.CLAUDE_BIN;
-  if (!IS_WIN) return 'claude';
-  const dirs = (process.env.PATH || '').split(path.delimiter).map((d) => d.replace(/"/g, ''))
-    .concat([path.join(os.homedir(), '.local', 'bin'), path.join(process.env.APPDATA || '', 'npm')]);
-  for (const d of dirs) {
-    for (const ext of ['.exe', '.cmd', '.bat']) {
-      const p = path.join(d, 'claude' + ext);
-      try { if (d && fs.statSync(p).isFile()) return p; } catch {}
-    }
-  }
-  return 'claude';
-}
-const CLAUDE_BIN = findClaude();
-if (IS_WIN && CLAUDE_BIN === 'claude') {
-  console.error('\n  ⚠ 没有找到 Claude Code（claude.exe / claude.cmd）。请先安装并登录：https://docs.claude.com/claude-code');
-  console.error('    如果装在特殊位置，可设置环境变量 CLAUDE_BIN 为 claude 的完整路径\n');
-}
-function spawnClaude(cliArgs, opts) {
-  if (IS_WIN && /\.(cmd|bat)$/i.test(CLAUDE_BIN)) {
-    // .cmd 只能通过 cmd.exe 运行；参数都经过校验，只含安全字符
-    const line = [CLAUDE_BIN, ...cliArgs].map((a) => (/[\s"&|<>^]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a)).join(' ');
-    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { ...opts, windowsVerbatimArguments: true, windowsHide: true });
-  }
-  return spawn(CLAUDE_BIN, cliArgs, { ...opts, windowsHide: true });
-}
-
-// 新版 claude 默认 --system-prompt-snapshot on：会话第一次请求时录下系统提示词，之后每轮/每次 --resume 都原样重发，
-// 后来传的 --system-prompt-file 被忽略（改预设、中途开关预设对已有会话都不生效）。
-// 酒馆是每次请求现拼，所以关掉。旧版本不认识这个参数会报错，启动时先看 --help 里有没有。
-// --append-system-prompt-file：用来把预设排到系统字段最后（网页说明走 --system-prompt-file 排前面）。
-// 帮助里只在 --bare 说明中以 --append-system-prompt[-file] 出现，不支持时退回旧顺序。
-let SNAPSHOT_FLAG = false, APPEND_FILE_FLAG = false;
-try {
-  const hc = spawnClaude(['--help'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
-  let ho = ''; hc.stdout.on('data', (d) => { ho += d; });
-  hc.on('close', () => {
-    SNAPSHOT_FLAG = /--system-prompt-snapshot/.test(ho);
-    APPEND_FILE_FLAG = /--append-system-prompt-file|--append-system-prompt\[-file\]/.test(ho);
-  });
-  hc.on('error', () => {});
-} catch {}
-// 停止进程。Windows 没有 SIGINT，用 taskkill 连同子进程一起结束
-function killProc(child, force) {
-  if (!child || child.exitCode !== null) return;
-  if (IS_WIN) { spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }).on('error', () => {}); return; }
-  try { child.kill(force ? 'SIGKILL' : 'SIGINT'); } catch {}
-}
 function openBrowser(url) {
   const cmd = IS_WIN ? ['cmd', ['/c', 'start', '""', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   try { spawn(cmd[0], cmd[1], { stdio: 'ignore', detached: true, windowsHide: true }).on('error', () => {}).unref(); } catch {}
@@ -90,7 +43,6 @@ const TOKEN = (() => {
   fs.writeFileSync(f, t + '\n', { mode: 0o600 });
   return t;
 })();
-const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 const INDEX_HTML = path.join(__dirname, 'index.html');
 const SID_RE = /^[0-9a-f-]{36}$/;
@@ -100,7 +52,7 @@ const MEDIA_TYPES = {
   ...IMAGE_TYPES, '.bmp': 'image/bmp', '.avif': 'image/avif',
   '.mp4': 'video/mp4', '.m4v': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
 };
-// 告诉 Claude 这个前端能显示本地图片 / 视频
+// 告诉 Codex 这个前端能显示本地图片 / 视频
 const WEB_PROMPT = '你正在通过一个网页前端和用户对话，回复按 Markdown 渲染。'
   + '要给用户看本地的图片或视频时，用 Markdown 图片语法 ![说明](文件绝对路径) 引用，网页会直接显示出来'
   + '（支持 png jpg gif webp bmp avif mp4 webm mov）；路径里有空格时写成 ![说明](<路径>)。';
@@ -110,52 +62,22 @@ const PRESETS_DIR = path.join(__dirname, 'presets');
 try { fs.mkdirSync(PRESETS_DIR, { recursive: true }); } catch {}
 // 把一份 ST 预设拆成：system 字段 / 种进会话开头的 user、assistant 轮 / 第一条消息前的文本
 // 如实按预设的角色+顺序组装：
-//   role=system → 开头连续的进 system 字段（API 只有一个 system 字段）
-//   role=assistant → 真 assistant 消息（伪装）
+//   role=system → 开头连续的替换 Codex 基础指令
+//   role=assistant → 真 assistant 历史消息
 //   role=user → 并进相邻的 user 消息
 //   Chat History 标记 → 不再分前后：标记之后的条目按原顺序挪到聊天历史之前，和前面的条目接着排
-// 为什么不像酒馆那样把标记后的内容贴在最新消息后：claude 会把整条消息存进历史，要么每轮多一份，
+// 为什么不像酒馆那样把标记后的内容贴在最新消息后：codex 会把整条消息存进历史，要么每轮多一份，
 // 要么每轮从旧消息上剥掉——剥掉会让上一轮存下的缓存全部对不上，工具调用多时整段历史缓存失效。
 // 全部放在聊天历史前面、只出现一次，缓存就不会被打断。
 // 返回：systemField(系统字段) / seedTurns(种进会话开头的 user/assistant 轮) /
 //       historyHead(最后一个 assistant 之后的文本，只拼在新会话第一条消息前)
 // 酒馆预设常同时有 100000（默认顺序）和 100001（预设自己的顺序），优先用 100001
-function pickOrder(d) {
-  const po = (d && Array.isArray(d.prompt_order)) ? d.prompt_order : [];
-  const o = po.find((x) => x && x.character_id === 100001) || po[0];
-  return (o && Array.isArray(o.order)) ? o.order : [];
-}
-function assembleFromST(d) {
-  const byId = {}; for (const p of (d.prompts || [])) byId[p.identifier] = p;
-  const order = pickOrder(d);
-  const sys = [], turns = [];
-  let buf = '', leading = true;
-  const pushAssistant = (c) => {
-    if (buf.trim()) { turns.push({ role: 'user', content: buf.trim() }); buf = ''; turns.push({ role: 'assistant', content: c }); }
-    else if (turns.length && turns[turns.length - 1].role === 'assistant') turns[turns.length - 1].content += '\n\n' + c; // 连续 assistant 合并成一条
-    else { if (!turns.length) turns.push({ role: 'user', content: '继续。' }); turns.push({ role: 'assistant', content: c }); } // API 要求开头必须 user
-  };
-  for (const item of order) {
-    const p = byId[item.identifier] || {};
-    if (p.marker) continue; // Chat History 等标记只是占位，跳过，后面的条目接着排
-    if (!item.enabled) continue;
-    const c = p.content || ''; if (!c.trim()) continue;
-    const role = p.role || 'system';
-    // 只有「开头连续的 system」进 system 字段；一旦出现 assistant/user，后面的 system 按原位转成 user
-    if (leading && role === 'system') { sys.push(c); continue; }
-    leading = false;
-    if (role === 'assistant') pushAssistant(c);
-    else buf += (buf ? '\n\n' : '') + c;  // user，或排在 assistant 之后的 system（转 user，留在原位）
-  }
-  // 最后一个 assistant 之后的文本（historyHead）：只拼在新会话第一条真实消息前面，之后的消息都不带。
-  // 不能单独种成一条 user：种子以 user 结尾时，claude --resume 会自己补一条 "No response requested." 的 assistant。
-  return { systemField: sys.join('\n\n'), seedTurns: turns, historyHead: buf.trim() };
-}
 const PRESET_RE = /^[^\/\\]+\.json$/;
 function loadPresetFile(file) {
   if (!PRESET_RE.test(file || '')) return null;
-  try { return JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, file), 'utf8')); } catch { return null; }
+  try { const data = JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, file), 'utf8')); validatePreset(data); return data; } catch { return null; }
 }
+
 // 选了预设就用预设装配；没选返回 null（=普通 agent，不替换系统提示词）
 function getAssembled(file) { const d = loadPresetFile(file); return d ? assembleFromST(d) : null; }
 function listPresets() {
@@ -163,190 +85,19 @@ function listPresets() {
   return files.map((f) => { let name = f; try { name = JSON.parse(fs.readFileSync(path.join(PRESETS_DIR, f), 'utf8')).name || f; } catch {} return { file: f, name }; });
 }
 
-// ---------- 显示时剥掉预设拼进去的文字 ----------
-// historyHead 拼在新会话第一条消息前，claude 会把整条存进 jsonl；网页显示历史、会话标题时剥掉，只显示原文。
-// 记录在 inject/<会话ID>.json。{prefix, suffix} 是旧版本（每轮贴前缀/后缀）留下的记录，也只在显示时剥，不再改 jsonl。
-const INJECT_DIR = path.join(DATA_DIR, 'inject');
-const injectFile = (sid) => path.join(INJECT_DIR, sid + '.json');
-function loadInjects(sid) {
-  if (!/^[0-9a-f-]{36}$/.test(sid || '')) return [];
-  try { const a = JSON.parse(fs.readFileSync(injectFile(sid), 'utf8')); return Array.isArray(a) ? a : []; } catch { return []; }
-}
-function saveInject(sid, rec) {
-  rec = { prefix: rec.prefix || '', suffix: rec.suffix || '', head: rec.head || '' };
-  if (!/^[0-9a-f-]{36}$/.test(sid || '') || (!rec.prefix && !rec.suffix && !rec.head)) return;
-  const list = loadInjects(sid);
-  if (list.some((x) => (x.prefix || '') === rec.prefix && (x.suffix || '') === rec.suffix && (x.head || '') === rec.head)) return;
-  list.push(rec);
-  try { fs.mkdirSync(INJECT_DIR, { recursive: true }); fs.writeFileSync(injectFile(sid), JSON.stringify(list)); } catch {}
-}
-// 显示用：head 也当前缀剥
-const displayInjects = (sid) => loadInjects(sid).flatMap((x) => [x, { prefix: x.head || '', suffix: '' }]);
-// 拼法和 startRun 一致：前缀 + '\n\n' + 消息 + '\n\n' + 后缀；前缀、后缀各自完全匹配才剥
-function stripInjected(text, injects) {
-  if (typeof text !== 'string') return text;
-  let t = text;
-  for (const { prefix } of injects) {
-    if (!prefix) continue;
-    if (t.startsWith(prefix + '\n\n')) { t = t.slice(prefix.length + 2); break; }
-    if (t === prefix) { t = ''; break; }
-  }
-  for (const { suffix } of injects) {
-    if (!suffix) continue;
-    if (t.endsWith('\n\n' + suffix)) { t = t.slice(0, t.length - suffix.length - 2); break; }
-    if (t === suffix) { t = ''; break; }
-  }
-  return t;
-}
-
-const sessionDir = (cwd) => path.join(PROJECTS_DIR, cwd.replace(/[^a-zA-Z0-9]/g, '-'));
 function checkDir(p) {
   if (typeof p !== 'string' || !path.isAbsolute(p)) throw new Error('路径必须是绝对路径');
   const r = path.resolve(p);
   if (!fs.statSync(r).isDirectory()) throw new Error('不是文件夹: ' + r);
-  return r;
+  return fs.realpathSync.native(r);
 }
 
-// ---------- 运行中的 claude 进程（每个项目最多一个） ----------
-// 输出行全部缓存，断线（如手机锁屏）后可以从任意位置重新接上
-const runs = new Map(); // cwd -> { id, cwd, child, lines, done, listeners, sessionId }
-const activeRun = (cwd) => { const r = runs.get(cwd); return r && !r.done ? r : null; };
-const findRun = (id) => [...runs.values()].find((r) => r.id === id);
-
-function buildContent(message, attachments) {
-  const content = [];
-  const notes = [];
-  for (const a of attachments) {
-    const ext = path.extname(a.path).toLowerCase();
-    let size = 0;
-    try { size = fs.statSync(a.path).size; } catch { continue; }
-    if (IMAGE_TYPES[ext] && size <= 3.7 * 1024 * 1024) {
-      content.push({ type: 'image', source: { type: 'base64', media_type: IMAGE_TYPES[ext], data: fs.readFileSync(a.path).toString('base64') } });
-    }
-    notes.push(`- ${a.name}: ${a.path}`);
-  }
-  if (notes.length) content.push({ type: 'text', text: '📎 用户上传了以下文件（需要时可用 Read 等工具读取）:\n' + notes.join('\n') });
-  if (message) content.push({ type: 'text', text: message });
-  return content;
-}
-
-// 回溯：把会话文件截断到指定用户消息之前（原文件先备份），之后 --resume 就从那里接着聊
-// 返回 false 表示截断后已经没有对话内容，需要开新会话
-function rewindSession(cwd, sessionId, uuid) {
-  if (!SID_RE.test(sessionId || '')) throw new Error('没有可回溯的会话');
-  const f = path.join(sessionDir(cwd), sessionId + '.jsonl');
-  const lines = fs.readFileSync(f, 'utf8').split('\n');
-  const idx = lines.findIndex((l) => l.includes(`"uuid":"${uuid}"`) && l.includes('"type":"user"'));
-  if (idx < 0) throw new Error('找不到要回溯的消息，刷新页面后再试');
-  const bdir = path.join(DATA_DIR, 'backups');
-  fs.mkdirSync(bdir, { recursive: true });
-  fs.copyFileSync(f, path.join(bdir, `${sessionId}-${Date.now()}.jsonl`));
-  const keep = lines.slice(0, idx);
-  // 截断点之后的会话标题记录保留下来
-  for (const l of lines.slice(idx)) if (/"type":"(custom-title|ai-title)"/.test(l)) keep.push(l);
-  // 只剩预设种子（伪装对话）也算空：开新会话，重新种子 + 第一条消息前拼 historyHead
-  const hasConversation = keep.some((l) => /"type":"(user|assistant)"/.test(l) && !l.includes('"isMeta":true') && !l.includes('"seed":true'));
-  if (!hasConversation) { fs.rmSync(f, { force: true }); return false; }
-  fs.writeFileSync(f, keep.filter((l) => l.trim()).join('\n') + '\n');
-  return true;
-}
-
-// 种一个带「用户→AI 自我确认」的新会话文件，返回新 sessionId（供 --resume）。
-// 这两条带 seed:true，loadHistory 会跳过不显示，但二进制读文件时会把它们作为真历史发给模型。
-// 把预设的 user/assistant 轮如实种进新会话，--resume 时作为真历史发给模型
-function seedWritingSession(cwd, turns) {
-  const sid = crypto.randomUUID();
-  const dir = sessionDir(cwd); fs.mkdirSync(dir, { recursive: true });
-  const ts = () => new Date().toISOString();
-  const lines = [{ type: 'mode', mode: 'normal', sessionId: sid }, { type: 'permission-mode', permissionMode: 'auto', sessionId: sid }];
-  let parent = null;
-  for (const t of (turns || [])) {
-    const uuid = crypto.randomUUID();
-    const msg = t.role === 'assistant' ? { role: 'assistant', content: [{ type: 'text', text: t.content }] } : { role: 'user', content: t.content };
-    lines.push({ parentUuid: parent, isSidechain: false, cwd, sessionId: sid, version: '2.1.289', seed: true, type: t.role, userType: 'external', message: msg, uuid, timestamp: ts() });
-    parent = uuid;
-  }
-  fs.writeFileSync(path.join(dir, sid + '.jsonl'), lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
-  return sid;
-}
-
-function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, assembled }) {
-  const isNew = !sessionId;
-  // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
-  if (assembled && assembled.seedTurns && assembled.seedTurns.length && isNew) {
-    try { sessionId = seedWritingSession(cwd, assembled.seedTurns); } catch {}
-  }
-  // head：预设里最后一个 assistant 之后的文本，只拼在新会话第一条消息前（之后一直留在历史开头）
-  const head = (isNew && assembled && assembled.historyHead) || '';
-  const cliArgs = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages'];
-  if (sessionId) cliArgs.push('--resume', sessionId);
-  if (model) cliArgs.push('--model', model);
-  if (effort) cliArgs.push('--effort', effort);
-  if (permissionMode) cliArgs.push('--permission-mode', permissionMode);
-  if (SNAPSHOT_FLAG) cliArgs.push('--system-prompt-snapshot', 'off'); // 系统提示词每轮按当前预设现发，不沿用会话开头录下的
-  const sysFiles = [];
-  const tmpFile = (text) => {
-    const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
-    fs.writeFileSync(f, text); sysFiles.push(f); return f;
-  };
-  if (assembled && assembled.systemField) {
-    // 预设里开头连续的 system 进系统字段，--system-prompt-file 完全替换官方 system。
-    // 系统字段排列顺序（claude 固定）：计费标记 → 身份行 → system-prompt-file → WebSearch 说明等 → append
-    // 所以网页说明放 file、预设放 append-file，预设就排在系统字段最后。
-    try {
-      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(WEB_PROMPT), '--append-system-prompt-file', tmpFile(assembled.systemField));
-      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', WEB_PROMPT); // 旧版 claude
-    } catch { cliArgs.push('--append-system-prompt', WEB_PROMPT); }
-  } else {
-    cliArgs.push('--append-system-prompt', WEB_PROMPT);
-  }
-  const env ={ ...process.env };
-  // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
-  if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
-
-  const child = spawnClaude(cliArgs, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId };
-  runs.set(cwd, r);
-
-  const push = (line) => {
-    r.lines.push(line);
-    for (const fn of r.listeners) fn(line);
-  };
-  let buf = '';
-  child.stdout.on('data', (d) => {
-    buf += d.toString();
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim();
-      buf = buf.slice(i + 1);
-      if (!line) continue;
-      try {
-        const ev = JSON.parse(line);
-        if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) { r.sessionId = ev.session_id; saveInject(r.sessionId, { head }); }
-        if (ev.type === 'user' && !ev.parent_tool_use_id && Array.isArray(ev.message?.content)
-            && !ev.message.content.some((b) => b.type === 'tool_result')) continue; // 用户消息回显，前端已显示
-      } catch { continue; }
-      push(line);
-    }
-  });
-  let errBuf = '';
-  child.stderr.on('data', (d) => { errBuf += d.toString(); });
-  const finish = (code) => {
-    if (r.done) return;
-    for (const f of sysFiles) { try { fs.rmSync(f, { force: true }); } catch {} }
-    if (code && errBuf.trim()) push(JSON.stringify({ type: 'web_error', message: errBuf.trim().slice(-2000) }));
-    push(JSON.stringify({ type: 'web_done', code, sessionId: r.sessionId }));
-    r.done = true;
-    for (const fn of r.listeners) fn(null);
-    r.listeners.clear();
-  };
-  child.on('close', finish);
-  child.on('error', (e) => { errBuf += String(e); finish(1); });
-  // 新会话第一条消息前拼上预设的 historyHead；拼法改了的话 stripInjected 要跟着改
-  const userMsg = (head ? head + '\n\n' : '') + message;
-  child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: buildContent(userMsg, attachments) } }) + '\n');
-  return r;
-}
+// Codex 的进程和会话由独立适配层维护。
+const backend = new CodexBackend(DATA_DIR, WEB_PROMPT + '项目补充记忆在 .codex/web-memory/MEMORY.md，存在时请按需读取。');
+const runs = backend.runs;
+const activeRun = cwd => backend.active(cwd);
+const findRun = id => backend.find(id);
+const startRun = options => backend.start(options);
 
 function streamRun(r, from, req, res) {
   res.writeHead(200, {
@@ -360,77 +111,16 @@ function streamRun(r, from, req, res) {
   if (r.done) return res.end();
   const fn = (line) => (line === null ? res.end() : res.write(line + '\n'));
   r.listeners.add(fn);
-  req.on('close', () => r.listeners.delete(fn)); // 断线不杀进程，任务继续在后台跑
+  res.on('close', () => r.listeners.delete(fn)); // 断线不杀进程，任务继续在后台跑
 }
 
-// ---------- 用量（订阅额度） ----------
-// 用 `claude -p /usage` 获取，不调用模型、不消耗额度；结果缓存 1 分钟
-let usageCache = null;
-function getUsage(force) {
-  if (!force && usageCache && Date.now() - usageCache.at < 60e3) return Promise.resolve(usageCache);
-  return new Promise((resolve) => {
-    const child = spawnClaude(['-p', '/usage', '--no-session-persistence'], { cwd: DATA_DIR, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    child.stdout.on('data', (d) => { out += d; });
-    child.stderr.on('data', (d) => { out += d; });
-    const timer = setTimeout(() => killProc(child, true), 60e3);
-    child.on('close', () => {
-      clearTimeout(timer);
-      const lines = out.split('\n').map((l) => l.trim()).filter(Boolean);
-      const windows = [];
-      const notes = [];
-      for (const l of lines) {
-        const m = l.match(/^(.+?):\s*(\d+(?:\.\d+)?)%\s*used(?:\s*·\s*resets\s+(.+))?$/i);
-        if (m) windows.push({ label: m[1], pct: parseFloat(m[2]), resets: m[3] || '' });
-        else if (!/^warning:/i.test(l)) notes.push(l);
-      }
-      usageCache = { at: Date.now(), windows, notes };
-      resolve(usageCache);
-    });
-  });
-}
-
-// ---------- 项目 & 会话 ----------
-function textOfUserContent(c) {
-  if (typeof c === 'string') return c;
-  if (Array.isArray(c)) return c.filter((b) => b.type === 'text' && !b.text.startsWith('📎')).map((b) => b.text).join('\n');
-  return '';
-}
-const isNoise = (t) => !t || /^\s*<(command-|local-command|system-reminder)/.test(t) || t.startsWith('Caveat:');
-// Claude Code 自己塞进会话的“用户”消息（后台任务完成通知等），不是用户本人发的
-const isSystemPrompt = (o) => o.promptSource === 'system' || (!!o.origin && !!o.origin.kind && o.origin.kind !== 'human');
-
-function readHead(p, bytes) {
-  const fd = fs.openSync(p, 'r');
-  try {
-    const b = Buffer.alloc(Math.min(fs.fstatSync(fd).size, bytes));
-    fs.readSync(fd, b, 0, b.length, 0);
-    return b.toString();
-  } finally { fs.closeSync(fd); }
-}
-
-function listProjects() {
-  const out = new Map();
-  let dirs = [];
-  try { dirs = fs.readdirSync(PROJECTS_DIR); } catch {}
-  for (const d of dirs) {
-    const full = path.join(PROJECTS_DIR, d);
-    let files;
-    try { files = fs.readdirSync(full).filter((f) => f.endsWith('.jsonl')); } catch { continue; }
-    if (!files.length) continue;
-    const stats = files.map((f) => ({ f, m: fs.statSync(path.join(full, f)).mtimeMs })).sort((a, b) => b.m - a.m);
-    let cwd = null;
-    for (const { f } of stats.slice(0, 5)) {
-      const m = readHead(path.join(full, f), 128 * 1024).match(/"cwd":"((?:[^"\\]|\\.)*)"/);
-      if (m) { cwd = JSON.parse('"' + m[1] + '"'); break; }
-    }
-    if (!cwd || sessionDir(cwd) !== full) continue;
-    try { if (!fs.statSync(cwd).isDirectory()) continue; } catch { continue; }
-    out.set(cwd, { cwd, name: path.basename(cwd) || cwd, mtime: stats[0].m, count: files.length });
-  }
-  if (!out.has(START_CWD)) out.set(START_CWD, { cwd: START_CWD, name: path.basename(START_CWD) || START_CWD, mtime: 0, count: 0 });
-  return [...out.values()].sort((a, b) => b.mtime - a.mtime);
-}
+const getUsage = () => backend.usage();
+const listProjects = () => backend.listProjects(START_CWD);
+const listSessions = cwd => backend.listSessions(cwd);
+const loadHistory = (cwd, id) => backend.history(cwd, id);
+const deleteSession = (cwd, id) => backend.delete(cwd, id);
+const renameSession = (cwd, id, title) => backend.rename(cwd, id, title);
+function readHead(p, bytes) { const fd = fs.openSync(p, 'r'); try { const b = Buffer.alloc(Math.min(fs.fstatSync(fd).size, bytes)); fs.readSync(fd, b); return b.toString(); } finally { fs.closeSync(fd); } }
 
 function browse(p) {
   const dir = checkDir(p || os.homedir());
@@ -449,75 +139,13 @@ function browse(p) {
   };
 }
 
-function readHeadTail(p, bytes) {
-  const fd = fs.openSync(p, 'r');
-  try {
-    const size = fs.fstatSync(fd).size;
-    if (size <= bytes * 2) { const b = Buffer.alloc(size); fs.readSync(fd, b, 0, size, 0); return b.toString(); }
-    const h = Buffer.alloc(bytes), t = Buffer.alloc(bytes);
-    fs.readSync(fd, h, 0, bytes, 0); fs.readSync(fd, t, 0, bytes, size - bytes);
-    return h.toString() + '\n' + t.toString();
-  } finally { fs.closeSync(fd); }
-}
-
-function listSessions(cwd) {
-  const dir = sessionDir(cwd);
-  let files;
-  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')); } catch { return []; }
-  const out = [];
-  for (const f of files) {
-    const p = path.join(dir, f);
-    let st;
-    try { st = fs.statSync(p); } catch { continue; }
-    let title = '', customTitle = '', aiTitle = '';
-    const injects = displayInjects(f.slice(0, -6));
-    try {
-      for (const line of readHeadTail(p, 256 * 1024).split('\n')) {
-        if (!line.includes('"type":"user"') && !line.includes('title"')) continue;
-        let o; try { o = JSON.parse(line); } catch { continue; }
-        if (o.type === 'custom-title' && o.customTitle != null) customTitle = o.customTitle;
-        if (o.type === 'ai-title' && o.aiTitle && !/^Resume session /.test(o.aiTitle)) aiTitle = o.aiTitle;
-        if (!title && o.type === 'user' && !o.isMeta && !o.isSidechain && !o.seed && !isSystemPrompt(o)) {
-          const c = o.message && o.message.content;
-          const t = stripInjected(textOfUserContent(c), injects);
-          if (!isNoise(t)) title = t.trim().slice(0, 80);
-          else if (Array.isArray(c) && c.some((b) => b.type === 'image' || (b.type === 'text' && b.text.startsWith('📎')))) title = '[附件]';
-        }
-      }
-    } catch {}
-    if (!title && !customTitle) continue; // 空会话（如只有 /clear）不显示
-    out.push({ id: f.slice(0, -6), title: customTitle || aiTitle || title, renamed: !!customTitle, mtime: st.mtimeMs, size: st.size });
-  }
-  return out.sort((a, b) => b.mtime - a.mtime).slice(0, 200);
-}
-
-function deleteSession(cwd, id) {
-  if (!SID_RE.test(id)) throw new Error('无效的会话 ID');
-  const r = activeRun(cwd);
-  if (r && r.sessionId === id) throw new Error('该会话正在运行，请先停止');
-  const dir = sessionDir(cwd);
-  fs.rmSync(path.join(dir, id + '.jsonl'), { force: true });
-  fs.rmSync(path.join(dir, id), { recursive: true, force: true }); // 会话附带的子代理/工具结果目录
-  fs.rmSync(injectFile(id), { force: true });
-}
-
-function renameSession(cwd, id, title) {
-  if (!SID_RE.test(id)) throw new Error('无效的会话 ID');
-  const p = path.join(sessionDir(cwd), id + '.jsonl');
-  if (!fs.existsSync(p)) throw new Error('会话不存在');
-  title = String(title || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 200);
-  // 与 Claude Code 的 /rename 格式一致，终端里 claude --resume 也能看到新名字
-  fs.appendFileSync(p, JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: id }) + '\n');
-}
-
-// ---------- 记忆（auto memory + CLAUDE.md） ----------
-const memoryDir = (cwd) => path.join(sessionDir(cwd), 'memory');
-function claudeMdCandidates(cwd) {
+// ---------- 项目补充记忆与 AGENTS.md ----------
+const memoryDir = cwd => path.join(cwd, '.codex', 'web-memory');
+function codexMdCandidates(cwd) {
   return [
-    { path: path.join(cwd, 'CLAUDE.md'), label: '项目 CLAUDE.md', desc: '项目说明，所有会话都会读取' },
-    { path: path.join(cwd, '.claude', 'CLAUDE.md'), label: '项目 .claude/CLAUDE.md', desc: '同上，放在 .claude 目录里' },
-    { path: path.join(cwd, 'CLAUDE.local.md'), label: 'CLAUDE.local.md', desc: '仅本机的个人项目说明' },
-    { path: path.join(os.homedir(), '.claude', 'CLAUDE.md'), label: '全局 ~/.claude/CLAUDE.md', desc: '对所有项目生效的个人说明' },
+    { path: path.join(cwd, 'AGENTS.md'), label: '项目 AGENTS.md', desc: '项目开发约定' },
+    { path: path.join(cwd, 'AGENTS.override.md'), label: '项目 AGENTS.override.md', desc: '优先于同目录 AGENTS.md' },
+    { path: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'AGENTS.md'), label: '全局 AGENTS.md', desc: '个人全局约定' },
   ];
 }
 function listMemory(cwd) {
@@ -534,70 +162,19 @@ function listMemory(cwd) {
     }
   } catch {}
   memory.sort((a, b) => (b.name === 'MEMORY.md') - (a.name === 'MEMORY.md') || b.mtime - a.mtime);
-  const claude = claudeMdCandidates(cwd).map((c) => {
+  const codex = codexMdCandidates(cwd).map((c) => {
     let st = null; try { st = fs.statSync(c.path); } catch {}
     return { ...c, name: path.basename(c.path), exists: !!st, size: st ? st.size : 0, mtime: st ? st.mtimeMs : 0 };
   });
-  return { dir, memory, claude };
+  return { dir, memory, codex };
 }
-// 只允许访问：该项目 memory 目录下的 .md 文件，或几个固定的 CLAUDE.md 位置
+// 只允许访问：项目补充记忆目录下的 .md 文件，或固定的 AGENTS.md 位置
 function checkMemPath(cwd, p) {
   const r = path.resolve(String(p || ''));
   const dir = memoryDir(cwd);
   if (path.dirname(r) === dir && /^[^\/\\]+\.md$/.test(path.basename(r))) return r;
-  if (claudeMdCandidates(cwd).some((c) => c.path === r)) return r;
+  if (codexMdCandidates(cwd).some((c) => c.path === r)) return r;
   throw new Error('不允许访问这个文件');
-}
-
-function loadHistory(cwd, id) {
-  if (!SID_RE.test(id)) return [];
-  let raw;
-  try { raw = fs.readFileSync(path.join(sessionDir(cwd), id + '.jsonl'), 'utf8'); } catch { return []; }
-  const items = [];
-  const injects = displayInjects(id);
-  for (const line of raw.split('\n')) {
-    let o; try { o = JSON.parse(line); } catch { continue; }
-    if (o.isSidechain || o.isMeta || o.seed) continue;
-    if (o.type === 'user' && o.message && isSystemPrompt(o)) {
-      // 后台任务通知只显示一行摘要，其他系统消息不显示
-      const t = textOfUserContent(o.message.content);
-      const s = t.match(/<summary>([\s\S]*?)<\/summary>/);
-      if (/<task-notification>/.test(t)) items.push({ kind: 'command', text: '⚙ 后台任务：' + (s ? s[1].trim() : '已结束') });
-      continue;
-    }
-    if (o.type === 'user' && o.message) {
-      const c = o.message.content;
-      const images = [], files = [];
-      if (Array.isArray(c)) {
-        for (const b of c) {
-          if (b.type === 'tool_result') items.push({ kind: 'tool_result', id: b.tool_use_id, content: b.content, isError: !!b.is_error });
-          else if (b.type === 'image' && b.source && b.source.type === 'base64') {
-            images.push(b.source.data.length < 3e6 ? `data:${b.source.media_type};base64,${b.source.data}` : null);
-          } else if (b.type === 'text' && b.text.startsWith('📎')) {
-            for (const m of b.text.matchAll(/^- (.+?): ((?:\/|[A-Za-z]:\\).+)$/gm)) {
-              if (!IMAGE_TYPES[path.extname(m[2]).toLowerCase()]) files.push({ name: m[1], path: m[2] }); // 图片已直接显示
-            }
-          }
-        }
-      }
-      const t = stripInjected(textOfUserContent(c), injects); // 最新一条还带着前缀/后缀，显示时剥掉
-      const cmd = t.match(/<command-name>(\/?[^<]+)<\/command-name>(?:[\s\S]*?<command-args>([^<]*)<\/command-args>)?/);
-      const out = t.match(/<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/);
-      if (cmd) items.push({ kind: 'command', text: (cmd[1].startsWith('/') ? cmd[1] : '/' + cmd[1]) + (cmd[2] ? ' ' + cmd[2] : '') });
-      else if (out) { if (out[1].trim()) items.push({ kind: 'command_out', text: out[1].trim() }); }
-      else if (o.isCompactSummary) items.push({ kind: 'command', text: '— 上下文已压缩 —' });
-      else if (!isNoise(t) || images.length || files.length) {
-        items.push({ kind: 'user', uuid: o.uuid, text: isNoise(t) ? '' : t, images, files });
-      }
-    } else if (o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
-      for (const b of o.message.content) {
-        if (b.type === 'text' && b.text) items.push({ kind: 'text', text: b.text });
-        else if (b.type === 'thinking' && b.thinking) items.push({ kind: 'thinking', text: b.thinking });
-        else if (b.type === 'tool_use') items.push({ kind: 'tool_use', id: b.id, name: b.name, input: b.input });
-      }
-    }
-  }
-  return items;
 }
 
 function saveUpload(req, name) {
@@ -625,7 +202,7 @@ function parseCookies(req) {
   const o = {};
   (req.headers.cookie || '').split(';').forEach((p) => {
     const i = p.indexOf('=');
-    if (i > 0) o[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+    if (i > 0) { try { o[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim()); } catch {} }
   });
   return o;
 }
@@ -640,8 +217,16 @@ const readBody = (req) => new Promise((resolve, reject) => {
 });
 
 const server = http.createServer(async (req, res) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
   const url = new URL(req.url, 'http://x');
   const q = (k) => url.searchParams.get(k) || '';
+  const origin = req.headers.origin;
+  const host = req.headers.host || '';
+  if ((LOCAL_ONLY && !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)) ||
+      (origin && origin !== 'http://' + host) || req.headers['sec-fetch-site'] === 'cross-site') {
+    return json(res, 403, { error: '不允许跨站访问本机服务' });
+  }
   const authed = !TOKEN || parseCookies(req).cw_token === TOKEN || q('t') === TOKEN;
 
   if (url.pathname === '/' || url.pathname === '/index.html') {
@@ -667,15 +252,23 @@ const server = http.createServer(async (req, res) => {
         try { if (q('cwd')) cwd = checkDir(q('cwd')); } catch {}
         const r = activeRun(cwd);
         return json(res, 200, {
-          cwd, name: path.basename(cwd) || cwd, startCwd: START_CWD,
+          cwd, name: path.basename(cwd) || cwd, startCwd: START_CWD, app: 'codex-web',
           running: r ? { id: r.id, sessionId: r.sessionId } : null,
           busyProjects: [...runs.values()].filter((x) => !x.done).map((x) => x.cwd),
         });
       }
+      case '/api/models':
+        return json(res, 200, await backend.models());
+      case '/api/respond': {
+        if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+        const body = await readBody(req);
+        backend.respond(body.runId, String(body.requestId), body);
+        return json(res, 200, { ok: true });
+      }
       case '/api/usage':
-        return json(res, 200, await getUsage(q('force') === '1'));
+        return json(res, 200, await getUsage());
       case '/api/projects':
-        return json(res, 200, listProjects());
+        return json(res, 200, await listProjects());
       case '/api/presets':
         return json(res, 200, listPresets());
       case '/api/preset': {
@@ -686,6 +279,7 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'PUT') {
           const body = await readBody(req);
           if (!PRESET_RE.test(body.file || '')) return json(res, 400, { error: '文件名无效' });
+          validatePreset(body.data);
           fs.writeFileSync(path.join(PRESETS_DIR, body.file), JSON.stringify(body.data, null, 2));
           return json(res, 200, { ok: true });
         }
@@ -708,16 +302,16 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { path: p });
       }
       case '/api/sessions':
-        return json(res, 200, listSessions(checkDir(q('cwd'))));
+        return json(res, 200, await listSessions(checkDir(q('cwd'))));
       case '/api/history':
-        return json(res, 200, loadHistory(checkDir(q('cwd')), q('id')));
+        return json(res, 200, await loadHistory(checkDir(q('cwd')), q('id')));
       case '/api/session':
         if (req.method !== 'DELETE') return json(res, 405, { error: 'DELETE only' });
-        deleteSession(checkDir(q('cwd')), q('id'));
+        await deleteSession(checkDir(q('cwd')), q('id'));
         return json(res, 200, { ok: true });
       case '/api/session/rename': {
         const body = await readBody(req);
-        renameSession(checkDir(body.cwd), body.id, body.title);
+        await renameSession(checkDir(body.cwd), body.id, body.title);
         return json(res, 200, { ok: true });
       }
       case '/api/memory':
@@ -778,14 +372,15 @@ const server = http.createServer(async (req, res) => {
         if (req.method === 'PUT') {
           const body = await readBody(req);
           if (typeof body.model === 'string' && /^[\w.\-\[\]]*$/.test(body.model)) cur.model = body.model;
-          if (['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) cur.effort = body.effort;
+          if (['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(body.effort)) cur.effort = body.effort;
           if (typeof body.perm === 'string' && /^[a-zA-Z]+$/.test(body.perm)) cur.perm = body.perm;
+          if (typeof body.preset === 'string' && (!body.preset || PRESET_RE.test(body.preset))) cur.preset = body.preset;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
         }
         return json(res, 200, cur);
       }
       case '/api/media': {
-        // Claude 在回复里引用的本地图片 / 视频（只允许这些扩展名；支持 Range，视频可以拖动进度）
+        // Codex 在回复里引用的本地图片 / 视频（只允许这些扩展名；支持 Range，视频可以拖动进度）
         let p = q('path').replace(/^file:\/\/\/?/i, '');
         if (/^~[\\/]/.test(p)) p = path.join(os.homedir(), p.slice(2));
         if (!path.isAbsolute(p) && q('cwd')) p = path.join(q('cwd'), p);
@@ -821,15 +416,13 @@ const server = http.createServer(async (req, res) => {
         const message = String(body.message || '').trim();
         if (!message && !attachments.length) return json(res, 400, { error: '消息为空' });
         let sessionId = SID_RE.test(body.sessionId || '') ? body.sessionId : null;
-        if (body.rewindTo) {
-          if (!/^[0-9a-f-]{36}$/.test(body.rewindTo)) return json(res, 400, { error: '无效的消息 ID' });
-          if (!rewindSession(cwd, sessionId, body.rewindTo)) sessionId = null;
-        }
-        const assembled = getAssembled(body.preset);  // 选了预设就装配：替换 system + 种自攻击 + 后置
+        if (body.rewindTo && !SID_RE.test(body.rewindTo)) return json(res, 400, { error: '无效的消息 ID' });
+        if (body.preset && !loadPresetFile(body.preset)) return json(res, 400, { error: '预设不存在或格式错误' });
+        const assembled = getAssembled(body.preset);
         const r = startRun({
-          cwd, message, attachments, sessionId, assembled,
+          cwd, message, attachments, sessionId, assembled, rewindTo: body.rewindTo,
           model: /^[\w.\-\[\]]+$/.test(body.model || '') ? body.model : null,
-          effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : null,
+          effort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'].includes(body.effort) ? body.effort : null,
           permissionMode: /^[a-zA-Z]+$/.test(body.permissionMode || '') ? body.permissionMode : null,
         });
         return streamRun(r, 0, req, res);
@@ -842,8 +435,7 @@ const server = http.createServer(async (req, res) => {
       case '/api/stop': {
         const r = findRun(q('run'));
         if (r && !r.done) {
-          killProc(r.child, false);
-          setTimeout(() => { if (!r.done) killProc(r.child, true); }, 3000);
+          await backend.stop(r);
         }
         return json(res, 200, { ok: true });
       }
@@ -856,7 +448,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 function printUrl(link, already) {
-  console.log('\n  \x1b[1;38;5;209m✻ Claude Web\x1b[0m  ' + (already ? '已经在运行中' : '初始项目: \x1b[1m' + START_CWD + '\x1b[0m'));
+  console.log('\n  \x1b[1;37m◉ Codex Web\x1b[0m  ' + (already ? '已经在运行中' : '初始项目: \x1b[1m' + START_CWD + '\x1b[0m'));
   console.log('\n  在浏览器打开（Termux 中长按网址可直接打开，建议加入书签）:\n');
   console.log('  \x1b[4;36m' + link + '\x1b[0m\n');
   if (!LOCAL_ONLY) console.log(TOKEN ? '  ⚠ 已开放局域网访问，网址中的令牌请勿外泄\n' : '  ⚠ 已开放局域网访问且未启用令牌，同一网络的任何人都能打开\n');
@@ -870,19 +462,20 @@ function makeLink() {
 function listen() {
   server.once('error', (e) => {
     if (e.code !== 'EADDRINUSE') { console.error(e.message); process.exit(1); }
-    // 端口被占用：如果是已经在运行的 Claude Web，直接复用它
+    // 端口被占用：如果是已经在运行的 Codex Web，直接复用它
     const req = http.get({ host: '127.0.0.1', port: PORT, path: '/api/info', timeout: 2000 }, (res) => {
       let b = ''; res.on('data', (d) => (b += d));
       res.on('end', () => {
         let ok = false;
-        try { const j = JSON.parse(b); ok = 'startCwd' in j || j.error === 'unauthorized'; } catch {}
+        try { const j = JSON.parse(b); ok = j.app === 'codex-web'; } catch {}
         if (ok) { printUrl(makeLink(), true); console.log('  （网页里可以切换到任意项目，无需重复启动）\n'); process.exit(0); }
-        console.error(`\n  ❌ 端口 ${PORT} 被其他程序占用，可用 cw --port 其他端口\n`); process.exit(1);
+        console.error(`\n  ❌ 端口 ${PORT} 被其他程序占用，可用 codex-web --port 其他端口\n`); process.exit(1);
       });
     });
     req.on('error', () => { console.error(`\n  ❌ 端口 ${PORT} 被占用\n`); process.exit(1); });
   });
   server.listen(PORT, HOST, () => {
+    PORT = server.address().port;
     printUrl(makeLink(), false);
     console.log('  按 Ctrl+C 停止\n');
   });
@@ -902,7 +495,7 @@ function lanIp() {
   }
   return best || '127.0.0.1';
 }
-const shutdown = () => { for (const r of runs.values()) if (!r.done) killProc(r.child, true); process.exit(0); };
+const shutdown = () => { backend.close(); server.close(); setTimeout(() => process.exit(0), 1800).unref(); };
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 listen();

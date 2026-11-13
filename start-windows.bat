@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
-title Claude Web
-rem 双击运行：启动 Claude Web 并自动打开浏览器（默认项目为用户主目录，网页里可切换）
+title Codex Web
+rem 双击运行：启动 Codex Web 并自动打开浏览器（默认项目为用户主目录，网页里可切换）
 where node >nul 2>nul
 if errorlevel 1 (
   echo.

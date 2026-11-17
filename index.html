@@ -138,6 +138,23 @@ details.thinking .tb { padding: 6px 12px 10px; color: var(--muted); white-space:
 .meta { font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
 .notice { font-size: 13px; padding: 8px 12px; border-radius: 8px; margin: 8px 0; background: var(--warn-bg); color: var(--warn); white-space: pre-wrap; word-break: break-word; }
 .notice.err { color: var(--err); }
+/* 中途提问 / 操作审批卡片 */
+.ask { margin: 10px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); padding: 12px; font-size: 14px; }
+.ask-h { font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+.ask-q { margin: 10px 0 6px; }
+.ask-q .qh { display: inline-block; font-size: 11.5px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; margin-right: 6px; }
+.ask-opts { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.ask-opt { text-align: left; border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 8px; padding: 8px 10px; line-height: 1.35; font: inherit; }
+.ask-opt small { display: block; color: var(--muted); font-size: 12px; }
+.ask-opt.on { border-color: var(--accent); background: rgba(217,119,87,.12); }
+.ask-other { width: 100%; box-sizing: border-box; margin-top: 6px; border: 1px solid var(--border); background: transparent; color: inherit; border-radius: 8px; padding: 8px 10px; font: inherit; resize: vertical; min-height: 38px; }
+.ask-other:focus { outline: none; border-color: var(--accent); }
+.ask-f { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; flex-wrap: wrap; }
+.ask .tin { max-height: 260px; overflow: auto; }
+.ask.closed { border-color: var(--border); opacity: .75; }
+.ask.closed .ask-f, .ask.closed .ask-other { display: none; }
+.ask.closed .ask-opt { pointer-events: none; }
+.ask-st { margin-top: 8px; font-size: 12.5px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
 .working { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; margin: 6px 0; }
 
 /* 输入框 */
@@ -393,6 +410,7 @@ textarea {
     <button class="pill" id="cmdPill"><b>/</b> 指令</button>
     <button class="pill" id="modelPill">模型 <b></b></button>
     <button class="pill" id="effortPill">effort <b></b></button>
+    <button class="pill" id="thinkPill">思考 <b></b></button>
     <button class="pill" id="permPill">权限 <b></b></button>
     <button class="pill" id="presetPill">预设 <b></b></button>
     <button class="pill" id="usagePill">用量 <span class="bar"><i style="width:0"></i></span> <b></b></button>
@@ -424,7 +442,7 @@ const store = {
 
 const S = {
   cwd: '', sessionId: null, running: false, runId: null, lineCount: 0,
-  turn: null, blocks: {}, cards: new Map(), seenMsgs: new Set(), sessions: [], afterDone: null,
+  turn: null, blocks: {}, cards: new Map(), asks: new Map(), seenMsgs: new Set(), sessions: [], afterDone: null,
   gen: 0, ctrl: null, pending: [],
 };
 const q = (params) => '?' + new URLSearchParams({ cwd: S.cwd, ...params });
@@ -705,6 +723,99 @@ function setToolResult(id, content, isError) {
 }
 function notice(text, err) { const n = el('div', 'notice' + (err ? ' err' : '')); n.textContent = text; ensureTurn().appendChild(n); scrollDown(); }
 
+// ================= 中途提问（AskUserQuestion）/ 操作审批 =================
+// claude 用 --permission-prompt-tool stdio 启动：需要人回答时输出 control_request 并暂停，网页回答（/api/answer）后继续
+const TOOL_CN = { Bash: '执行命令', PowerShell: '执行命令', Write: '写入文件', Edit: '修改文件', MultiEdit: '修改文件', NotebookEdit: '修改笔记本', WebFetch: '访问网页', ExitPlanMode: '计划已完成，开始执行吗？' };
+const openAsks = () => [...S.asks.values()].filter((b) => !b.classList.contains('closed'));
+function addAsk(id, req) {
+  if (!id || S.asks.has(id)) return;
+  S.turn?.querySelector('.working')?.remove();
+  const box = el('div', 'ask'); box._id = id;
+  S.asks.set(id, box);
+  const inp = req.input || {};
+  if (req.tool_name === 'AskUserQuestion' && Array.isArray(inp.questions)) {
+    box.appendChild(el('div', 'ask-h', '✻ Claude 有问题想问你'));
+    box._qs = inp.questions.map((q) => {
+      const w = el('div', 'ask-q');
+      w.innerHTML = (q.header ? `<span class="qh">${esc(q.header)}</span>` : '') + `<b>${esc(q.question || '')}</b>`
+        + (q.multiSelect ? ' <small style="color:var(--muted)">（可多选）</small>' : '');
+      const opts = el('div', 'ask-opts'), sel = new Set();
+      for (const o of q.options || []) {
+        const b = el('button', 'ask-opt', esc(o.label) + (o.description ? `<small>${esc(o.description)}</small>` : ''));
+        b._label = o.label;
+        b.onclick = () => {
+          if (q.multiSelect) { if (sel.has(o.label)) sel.delete(o.label); else sel.add(o.label); }
+          else { const on = sel.has(o.label); sel.clear(); if (!on) sel.add(o.label); }
+          opts.querySelectorAll('.ask-opt').forEach((x) => x.classList.toggle('on', sel.has(x._label)));
+        };
+        opts.appendChild(b);
+      }
+      const other = el('textarea', 'ask-other'); other.rows = 1; other.placeholder = '其他：自己输入答案（填了就以这里为准）';
+      w.append(opts, other); box.appendChild(w);
+      return { q, sel, other, opts };
+    });
+    const f = el('div', 'ask-f');
+    const skip = el('button', 'btn', '跳过'), ok = el('button', 'btn primary', '提交');
+    skip.onclick = () => answerAsk(box, { behavior: 'deny' });
+    ok.onclick = () => {
+      const answers = {};
+      for (const { q, sel, other } of box._qs) {
+        const v = other.value.trim() || (q.options || []).map((o) => o.label).filter((l) => sel.has(l)).join(', ');
+        if (!v) return toast('还有问题没回答：' + (q.header || q.question));
+        answers[q.question] = v;
+      }
+      answerAsk(box, { behavior: 'allow', answers });
+    };
+    f.append(skip, ok); box.appendChild(f);
+  } else {
+    const name = req.display_name || req.tool_name || '工具';
+    box.appendChild(el('div', 'ask-h', '✻ 需要你确认：' + esc(TOOL_CN[req.tool_name] || name)));
+    if (req.tool_name === 'ExitPlanMode' && inp.plan) { const m = el('div', 'md'); m.innerHTML = md(String(inp.plan)); box.appendChild(m); }
+    else {
+      const m = el('div');
+      m.innerHTML = `<div style="margin-bottom:4px"><span class="tname">${esc(name)}</span> <span class="targ">${esc(toolArg(req.tool_name, inp).split('\n')[0].slice(0, 200))}</span></div>`
+        + toolInputHtml(req.tool_name, inp);
+      box.appendChild(m);
+    }
+    const why = req.decision_reason || req.reason;
+    if (why && typeof why === 'string') box.appendChild(el('div', 'ask-st', esc(why)));
+    const reason = el('textarea', 'ask-other'); reason.rows = 1; reason.placeholder = '拒绝时可以告诉 Claude 原因或该怎么做（可不填）';
+    box.appendChild(reason);
+    const f = el('div', 'ask-f');
+    const no = el('button', 'btn', '拒绝'), yes = el('button', 'btn primary', '允许');
+    no.onclick = () => answerAsk(box, { behavior: 'deny', message: reason.value });
+    yes.onclick = () => answerAsk(box, { behavior: 'allow' });
+    f.append(no, yes); box.appendChild(f);
+  }
+  ensureTurn().appendChild(box);
+  stick = true; scrollDown(true);
+  if (document.hidden) { try { navigator.vibrate?.(200); } catch {} document.title = '❓ ' + document.title.replace(/^❓ /, ''); }
+}
+async function answerAsk(box, body) {
+  if (box._busy) return; box._busy = true;
+  box.querySelectorAll('.ask-f button').forEach((b) => { b.disabled = true; });
+  try {
+    await getJSON('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run: S.runId, requestId: box._id, ...body }) });
+    // 卡片由服务端随后发来的 web_ask_done 关闭（断线重连 / 刷新页面重放时也一样）
+  } catch (e) {
+    toast('提交失败：' + e.message);
+    box._busy = false; box.querySelectorAll('.ask-f button').forEach((b) => { b.disabled = false; });
+  }
+}
+function closeAsk(id, status, answers) {
+  const box = S.asks.get(id); if (!box || box.classList.contains('closed')) return;
+  box.classList.add('closed');
+  if (answers && box._qs) for (const { q, opts } of box._qs) {
+    const v = answers[q.question] || '';
+    const labels = (q.options || []).map((o) => o.label), parts = v.split(', ');
+    opts.querySelectorAll('.ask-opt').forEach((x) => x.classList.toggle('on', parts.includes(x._label)));
+    if (v && !parts.every((x) => labels.includes(x))) opts.appendChild(el('div', 'ask-st', '你的回答：' + esc(v)));
+  }
+  box.appendChild(el('div', 'ask-st', '— ' + esc(status)));
+  if (!openAsks().length) document.title = document.title.replace(/^❓ /, '');
+}
+addEventListener('visibilitychange', () => { if (!document.hidden && !openAsks().length) document.title = document.title.replace(/^❓ /, ''); });
+
 // ================= 流式事件 =================
 function finishStreamingText() { S.turn?.querySelectorAll('.cursor').forEach((x) => x.classList.remove('cursor')); }
 
@@ -748,6 +859,11 @@ function handle(ev) {
       if (parts.length) ensureTurn().appendChild(el('div', 'meta', '✓ ' + esc(parts.join(' · '))));
       scrollDown(); return;
     }
+    case 'control_request':
+      if (ev.request && ev.request.subtype === 'can_use_tool') addAsk(ev.request_id, ev.request);
+      return;
+    case 'control_cancel_request': return closeAsk(ev.request_id, '已取消');
+    case 'web_ask_done': return closeAsk(ev.request_id, ev.behavior === 'allow' ? (ev.answers ? '已回答' : '已允许') : '已拒绝 / 跳过', ev.answers);
     case 'web_error': return notice(ev.message, true);
     case 'web_done': refreshUsage(); return onDone(ev);
   }
@@ -781,6 +897,7 @@ function handleStream(e) {
     case 'content_block_stop': {
       const d = S.blocks[e.index]; if (!d) return;
       d.classList.remove('cursor');
+      if (d._kind === 'thinking' && !d._text.trim()) d.querySelector('summary').textContent = '✻ 思考过程（没有返回内容，可在「思考」按钮里打开显示）';
       if (d._name !== undefined && d._json) { try { setToolInput(d, JSON.parse(d._json)); } catch {} }
       return;
     }
@@ -868,7 +985,7 @@ async function send() {
     res = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: S.ctrl.signal,
       body: JSON.stringify({
-        cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm,
+        cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm, thinking: prefs.thinking,
         preset: prefs.preset,
         attachments: atts.map((a) => ({ path: a.path, name: a.name })), rewindTo,
       }),
@@ -925,6 +1042,7 @@ async function reattach(gen) {
 
 function onDone(ev) {
   finishStreamingText();
+  for (const b of openAsks()) closeAsk(b._id, '任务已结束，没有回答');
   S.turn?.querySelector('.working')?.remove();
   if (ev.sessionId) setSession(ev.sessionId);
   setRunning(false);
@@ -1088,7 +1206,7 @@ async function deleteSession(s) {
     loadSessions();
   } catch (e) { toast(e.message); }
 }
-function resetView() { clearEdit(); chat.innerHTML = ''; S.turn = null; S.blocks = {}; S.cards.clear(); S.seenMsgs.clear(); }
+function resetView() { clearEdit(); chat.innerHTML = ''; S.turn = null; S.blocks = {}; S.cards.clear(); S.seenMsgs.clear(); S.asks.clear(); }
 async function openSession(id) {
   const cwd = S.cwd;
   let items = [];
@@ -1378,17 +1496,23 @@ const EFFORTS = [
   ['max', 'max', '最大思考量，最慢、最耗额度'],
 ];
 const PERMS = [
-  ['acceptEdits', '改文件', 'acceptEdits：自动允许修改文件，执行命令等会被拒绝'],
+  ['acceptEdits', '改文件', 'acceptEdits：自动允许修改文件，执行命令等会弹框问你'],
   ['auto', '自动', 'auto：由 Claude 自动判断是否安全'],
-  ['bypassPermissions', '全部允许', 'bypassPermissions：任何操作都直接执行（已自动解除 root 限制）'],
+  ['bypassPermissions', '全部允许', 'bypassPermissions：任何操作都直接执行（已自动解除 root 限制）；Claude 主动提问仍会弹框'],
   ['plan', '只规划', 'plan：只读，不改任何东西'],
-  ['default', '严格', 'default：需要确认的操作一律拒绝'],
+  ['default', '严格', 'default：改文件、执行命令等都要弹框确认'],
 ];
-const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), preset: store.get('preset', '') };
+const THINKS = [
+  ['summarized', '显示摘要', '显示思考过程的摘要（API 只提供摘要，不是逐字原文）'],
+  ['highlights', '只看标题', '每段思考只显示一个简短标题'],
+  ['omitted', '不显示', '不返回思考内容（Claude Code 默认），只留一个「思考过程」占位'],
+];
+const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), preset: store.get('preset', '') };
 const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
   $('effortPill').querySelector('b').textContent = prefs.effort || '默认';
+  $('thinkPill').querySelector('b').textContent = labelOf(THINKS, prefs.thinking);
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
   $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
@@ -1402,7 +1526,7 @@ function setPref(k, v) {
 getJSON('/api/prefs').then((p) => {
   // 服务端还没有记录：把这个浏览器里原有的选择存上去
   if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
-  for (const k of ['model', 'effort', 'perm']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  for (const k of ['model', 'effort', 'perm', 'thinking']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
   renderPills();
 }).catch(() => {});
 
@@ -1429,6 +1553,7 @@ $('modelPill').onclick = () => pick('选择模型', MODELS, prefs.model, (v) => 
   if (name != null) setPref('model', name.trim());
 });
 $('effortPill').onclick = () => pick('思考强度（effort）', EFFORTS, prefs.effort, (v) => setPref('effort', v));
+$('thinkPill').onclick = () => pick('思考过程显示', THINKS, prefs.thinking, (v) => setPref('thinking', v));
 $('permPill').onclick = () => pick('权限模式', PERMS, prefs.perm, (v) => setPref('perm', v));
 // 写作模式：开启后把破限头作为系统级指令注入（见 server.js 的 writing-head.txt）。仅存本浏览器。
 // 预设选择

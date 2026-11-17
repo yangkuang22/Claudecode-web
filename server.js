@@ -59,15 +59,26 @@ function spawnClaude(cliArgs, opts) {
 // 酒馆是每次请求现拼，所以关掉。旧版本不认识这个参数会报错，启动时先看 --help 里有没有。
 // --append-system-prompt-file：用来把预设排到系统字段最后（网页说明走 --system-prompt-file 排前面）。
 // 帮助里只在 --bare 说明中以 --append-system-prompt[-file] 出现，不支持时退回旧顺序。
-let SNAPSHOT_FLAG = false, APPEND_FILE_FLAG = false;
+// --thinking-display：默认（showThinkingSummaries 没开）claude 请求的是 omitted，思考块是空的，网页看不到内容。
+// --permission-prompt-tool stdio：权限请求（包括 AskUserQuestion 提问）通过 stdin/stdout 交给网页回答。
+let SNAPSHOT_FLAG = false, APPEND_FILE_FLAG = false, THINKING_FLAG = false, PROMPT_TOOL_FLAG = false;
 try {
   const hc = spawnClaude(['--help'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
   let ho = ''; hc.stdout.on('data', (d) => { ho += d; });
   hc.on('close', () => {
     SNAPSHOT_FLAG = /--system-prompt-snapshot/.test(ho);
     APPEND_FILE_FLAG = /--append-system-prompt-file|--append-system-prompt\[-file\]/.test(ho);
+    PROMPT_TOOL_FLAG = /--permission-prompt-tool/.test(ho);
   });
   hc.on('error', () => {});
+} catch {}
+// --thinking-display 是隐藏参数，--help 里没有。用空输入试一下：不认识会报 unknown option，
+// 认识的话只会报「没有输入」，不会调用模型
+try {
+  const tc = spawnClaude(['-p', '--thinking-display', 'summarized'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+  let te = ''; tc.stdout.on('data', (d) => { te += d; }); tc.stderr.on('data', (d) => { te += d; });
+  tc.on('close', () => { THINKING_FLAG = te.length > 0 && !/unknown option/i.test(te); });
+  tc.on('error', () => {});
 } catch {}
 // 停止进程。Windows 没有 SIGINT，用 taskkill 连同子进程一起结束
 function killProc(child, force) {
@@ -270,7 +281,8 @@ function seedWritingSession(cwd, turns) {
   return sid;
 }
 
-function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, assembled }) {
+const THINKING_DISPLAYS = ['summarized', 'highlights', 'omitted'];
+function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, thinking, assembled }) {
   const isNew = !sessionId;
   // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
   if (assembled && assembled.seedTurns && assembled.seedTurns.length && isNew) {
@@ -284,6 +296,9 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (effort) cliArgs.push('--effort', effort);
   if (permissionMode) cliArgs.push('--permission-mode', permissionMode);
   if (SNAPSHOT_FLAG) cliArgs.push('--system-prompt-snapshot', 'off'); // 系统提示词每轮按当前预设现发，不沿用会话开头录下的
+  if (THINKING_FLAG && thinking) cliArgs.push('--thinking-display', thinking);
+  // 需要人回答的请求（提问、执行命令的审批等）发到 stdout 等网页回答；不加的话 -p 模式下一律自动拒绝
+  if (PROMPT_TOOL_FLAG) cliArgs.push('--permission-prompt-tool', 'stdio');
   const sysFiles = [];
   const tmpFile = (text) => {
     const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
@@ -305,13 +320,16 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
 
   const child = spawnClaude(cliArgs, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
-  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId };
+  // asks：等网页回答的请求 request_id -> request
+  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId, asks: new Map() };
   runs.set(cwd, r);
 
   const push = (line) => {
     r.lines.push(line);
     for (const fn of r.listeners) fn(line);
   };
+  r.push = push;
+  child.stdin.on('error', () => {}); // 进程已退出时写 stdin 会 EPIPE，忽略
   let buf = '';
   child.stdout.on('data', (d) => {
     buf += d.toString();
@@ -325,6 +343,16 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
         if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) { r.sessionId = ev.session_id; saveInject(r.sessionId, { head }); }
         if (ev.type === 'user' && !ev.parent_tool_use_id && Array.isArray(ev.message?.content)
             && !ev.message.content.some((b) => b.type === 'tool_result')) continue; // 用户消息回显，前端已显示
+        if (ev.type === 'control_request' && ev.request_id) {
+          if (ev.request?.subtype === 'can_use_tool') r.asks.set(ev.request_id, ev.request);
+          else { // 其它控制请求网页处理不了，直接回错误，免得 claude 一直等
+            writeStdin(r, { type: 'control_response', response: { subtype: 'error', request_id: ev.request_id, error: '网页前端不支持这个请求' } });
+            continue;
+          }
+        }
+        if (ev.type === 'control_cancel_request' && ev.request_id) r.asks.delete(ev.request_id);
+        // 一轮结束：关掉 stdin，claude 才会退出（stdin 开着时它会继续等下一条消息）
+        if (ev.type === 'result' && !ev.parent_tool_use_id) { r.asks.clear(); try { child.stdin.end(); } catch {} }
       } catch { continue; }
       push(line);
     }
@@ -344,8 +372,41 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   child.on('error', (e) => { errBuf += String(e); finish(1); });
   // 新会话第一条消息前拼上预设的 historyHead；拼法改了的话 stripInjected 要跟着改
   const userMsg = (head ? head + '\n\n' : '') + message;
-  child.stdin.end(JSON.stringify({ type: 'user', message: { role: 'user', content: buildContent(userMsg, attachments) } }) + '\n');
+  const first = { type: 'user', message: { role: 'user', content: buildContent(userMsg, attachments) } };
+  // 能回答权限请求时 stdin 保持打开（收到 result 再关），否则和以前一样写完就关
+  if (PROMPT_TOOL_FLAG) writeStdin(r, first); else child.stdin.end(JSON.stringify(first) + '\n');
   return r;
+}
+function writeStdin(r, obj) {
+  try { if (!r.done && r.child.stdin.writable) { r.child.stdin.write(JSON.stringify(obj) + '\n'); return true; } } catch {}
+  return false;
+}
+// 网页回答一个权限请求。AskUserQuestion：answers = { 问题原文: 答案 }；其它工具：允许 / 拒绝
+// updatedInput 用服务端记下的原始 input，不信任网页传来的工具参数
+function answerAsk(r, requestId, { behavior, answers, message }) {
+  const req = r.asks.get(requestId);
+  if (!req) throw new Error('这个请求已经结束或已回答');
+  let response;
+  if (behavior === 'allow') {
+    const input = req.input || {};
+    if (req.tool_name === 'AskUserQuestion') {
+      const qs = Array.isArray(input.questions) ? input.questions : [];
+      const a = {};
+      for (const q of qs) {
+        const v = answers && answers[q.question];
+        if (typeof v !== 'string' || !v.trim()) throw new Error('还有问题没回答：' + q.question);
+        a[q.question] = v.trim().slice(0, 4000);
+      }
+      response = { behavior: 'allow', updatedInput: { ...input, answers: a } };
+    } else response = { behavior: 'allow', updatedInput: input };
+  } else {
+    const def = req.tool_name === 'AskUserQuestion' ? '用户跳过了这些问题，没有回答。请按你自己的判断继续。' : '用户拒绝了这个操作。';
+    response = { behavior: 'deny', message: (typeof message === 'string' && message.trim()) ? message.trim().slice(0, 4000) : def };
+  }
+  if (!writeStdin(r, { type: 'control_response', response: { subtype: 'success', request_id: requestId, response } })) throw new Error('任务已经结束');
+  r.asks.delete(requestId);
+  // 记进输出流：断线重连 / 刷新页面重放时，网页知道这个请求已经回答过了
+  r.push(JSON.stringify({ type: 'web_ask_done', request_id: requestId, behavior: response.behavior, answers: response.updatedInput?.answers || null }));
 }
 
 function streamRun(r, from, req, res) {
@@ -780,6 +841,7 @@ const server = http.createServer(async (req, res) => {
           if (typeof body.model === 'string' && /^[\w.\-\[\]]*$/.test(body.model)) cur.model = body.model;
           if (['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) cur.effort = body.effort;
           if (typeof body.perm === 'string' && /^[a-zA-Z]+$/.test(body.perm)) cur.perm = body.perm;
+          if (THINKING_DISPLAYS.includes(body.thinking)) cur.thinking = body.thinking;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
         }
         return json(res, 200, cur);
@@ -831,6 +893,7 @@ const server = http.createServer(async (req, res) => {
           model: /^[\w.\-\[\]]+$/.test(body.model || '') ? body.model : null,
           effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : null,
           permissionMode: /^[a-zA-Z]+$/.test(body.permissionMode || '') ? body.permissionMode : null,
+          thinking: THINKING_DISPLAYS.includes(body.thinking) ? body.thinking : null,
         });
         return streamRun(r, 0, req, res);
       }
@@ -838,6 +901,19 @@ const server = http.createServer(async (req, res) => {
         const r = findRun(q('run'));
         if (!r) return json(res, 404, { error: 'no such run' });
         return streamRun(r, Math.max(0, parseInt(q('from') || '0', 10) || 0), req, res);
+      }
+      case '/api/answer': {
+        // 回答 claude 中途的提问（AskUserQuestion）或操作审批
+        if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+        const body = await readBody(req);
+        const r = findRun(body.run);
+        if (!r || r.done) return json(res, 404, { error: '任务已经结束' });
+        answerAsk(r, String(body.requestId || ''), {
+          behavior: body.behavior === 'allow' ? 'allow' : 'deny',
+          answers: body.answers && typeof body.answers === 'object' ? body.answers : null,
+          message: body.message,
+        });
+        return json(res, 200, { ok: true });
       }
       case '/api/stop': {
         const r = findRun(q('run'));

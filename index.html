@@ -1699,15 +1699,21 @@ renderPills();
 // 用量：订阅的 5 小时窗口 / 每周额度
 const barColor = (p) => (p >= 90 ? 'var(--err)' : p >= 70 ? 'var(--accent)' : 'var(--ok)');
 function fmtReset(s) {
-  // "Oct 8, 12pm (UTC)" / "Oct 9, 5:30am (UTC)" → 本地时间 + 剩余时长
-  const m = s.match(/([A-Z][a-z]{2})\w*\s+(\d{1,2}),?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i);
+  // 数字：毫秒时间戳（来自 rate_limit_event）；字符串："Oct 8, 12pm (UTC)" / "Oct 9, 5:30am (UTC)" → 本地时间 + 剩余时长
+  if (typeof s === 'number') return s ? fmtResetAt(s) : '';
+  const m = (s || '').match(/([A-Z][a-z]{2})\w*\s+(\d{1,2}),?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i);
   if (!m) return s ? '重置时间：' + s : '';
   const mon = 'janfebmaraprmayjunjulaugsepoctnovdec'.indexOf(m[1].toLowerCase()) / 3;
   let h = parseInt(m[3]) % 12; if (m[5].toLowerCase() === 'pm') h += 12;
   const now = new Date();
   let t = Date.UTC(now.getUTCFullYear(), mon, +m[2], h, +(m[4] || 0));
   if (t < now - 864e5 * 180) t = Date.UTC(now.getUTCFullYear() + 1, mon, +m[2], h, +(m[4] || 0));
-  const d = new Date(t), left = Math.max(0, t - now);
+  return fmtResetAt(t);
+}
+function fmtResetAt(t) {
+  const now = Date.now();
+  if (t <= now) return '已重置';
+  const d = new Date(t), left = t - now;
   const hh = Math.floor(left / 36e5), mm = Math.floor((left % 36e5) / 6e4);
   const pad = (n) => String(n).padStart(2, '0');
   const leftStr = hh >= 24 ? `${Math.floor(hh / 24)} 天 ${hh % 24} 小时` : `${hh} 小时 ${mm} 分`;
@@ -1733,13 +1739,13 @@ function renderUsage() {
     const u = el('div', 'u');
     u.innerHTML = `<div class="u-h"><b></b><span>${w.pct}%</span></div><div class="track"><i style="width:${Math.min(100, w.pct)}%;background:${barColor(w.pct)}"></i></div><small></small>`;
     u.querySelector('b').textContent = LABELS[w.label.toLowerCase()] || w.label;
-    u.querySelector('small').textContent = fmtReset(w.resets);
+    u.querySelector('small').textContent = fmtReset(w.resetAt || w.resets);
     box.appendChild(u);
   }
-  if (!usageData.windows.length) box.appendChild(el('div', 'note', '没有拿到用量数据（如果你用的是 API Key 而不是订阅，这里不会有额度信息）'));
+  if (!usageData.windows.length && !usageData.notes.length) box.appendChild(el('div', 'note', '没有拿到用量数据（如果你用的是 API Key 而不是订阅，这里不会有额度信息）'));
   for (const n of usageData.notes) { const x = el('div', 'note'); x.textContent = n; box.appendChild(x); }
-  const t = new Date(usageData.at);
-  const f = el('div', 'note', `更新于 ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')} · `);
+  const t = new Date(usageData.dataAt || usageData.at), hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+  const f = el('div', 'note', (usageData.dataAt ? `数据来自 ${fmtTime(usageData.dataAt)} 的对话` : `更新于 ${hm}`) + ' · ');
   const btn = el('button', 'btn', '刷新'); btn.style.marginLeft = '4px';
   btn.onclick = async () => { btn.disabled = true; btn.textContent = '查询中…'; await refreshUsage(true); renderUsage(); };
   f.appendChild(btn); box.appendChild(f);

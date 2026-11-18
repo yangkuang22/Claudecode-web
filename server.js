@@ -486,6 +486,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
           }
         }
         if (ev.type === 'control_cancel_request' && ev.request_id) r.asks.delete(ev.request_id);
+        if (ev.type === 'rate_limit_event') saveRateLimit(ev.rate_limit_info);
         // 一轮结束：关掉 stdin，claude 才会退出（stdin 开着时它会继续等下一条消息）
         if (ev.type === 'result' && !ev.parent_tool_use_id) { r.asks.clear(); try { child.stdin.end(); } catch {} }
       } catch { continue; }
@@ -560,7 +561,30 @@ function streamRun(r, from, req, res) {
 }
 
 // ---------- 用量（订阅额度） ----------
-// 用 `claude -p /usage` 获取，不调用模型、不消耗额度；结果缓存 1 分钟
+// 新版 claude 的 `/usage` 在 -p 模式下不再输出「xx% used」额度行，只剩用量分析。
+// 额度改从每次对话输出的 rate_limit_event 里取（unifiedWindows：five_hour / seven_day ...，utilization 0~1，resetsAt 秒），
+// 存到 ratelimit.json；旧版 claude 仍能从 /usage 解析出来时以 /usage 为准。
+const RATELIMIT_FILE = path.join(DATA_DIR, 'ratelimit.json');
+function saveRateLimit(info) {
+  if (!info || typeof info !== 'object') return;
+  const w = info.unifiedWindows && typeof info.unifiedWindows === 'object' ? info.unifiedWindows : null;
+  if (!w || !Object.keys(w).length) return;
+  try { fs.writeFileSync(RATELIMIT_FILE, JSON.stringify({ at: Date.now(), windows: w })); } catch {}
+  usageCache = null;
+}
+const RL_LABELS = { five_hour: '当前 5 小时窗口', seven_day: '本周（所有模型）', seven_day_opus: '本周（Opus）', seven_day_sonnet: '本周（Sonnet）' };
+function rateLimitWindows() {
+  let d; try { d = JSON.parse(fs.readFileSync(RATELIMIT_FILE, 'utf8')); } catch { return null; }
+  const now = Date.now(), windows = [];
+  for (const [k, v] of Object.entries(d.windows || {})) {
+    if (!v || typeof v.utilization !== 'number') continue;
+    const resetAt = v.resetsAt ? v.resetsAt * 1000 : 0;
+    // 已经过了重置时间：额度清零（下次对话会拿到新数据）
+    const pct = resetAt && resetAt < now ? 0 : Math.round(v.utilization * 1000) / 10;
+    windows.push({ label: RL_LABELS[k] || k, pct, resetAt });
+  }
+  return windows.length ? { at: d.at, windows } : null;
+}
 let usageCache = null;
 function getUsage(force) {
   if (!force && usageCache && Date.now() - usageCache.at < 60e3) return Promise.resolve(usageCache);
@@ -581,7 +605,13 @@ function getUsage(force) {
         if (m) windows.push({ label: m[1], pct: parseFloat(m[2]), resets: m[3] || '' });
         else if (!/^warning:/i.test(l)) notes.push(l);
       }
-      usageCache = { at: Date.now(), windows, notes };
+      let dataAt = 0;
+      if (!windows.length) {
+        const rl = rateLimitWindows();
+        if (rl) { windows.push(...rl.windows); dataAt = rl.at; notes.length = 0; }
+        else notes.splice(0, notes.length, '还没有额度数据：发一条消息后就会显示（新版 Claude Code 只在对话时返回额度；用 API Key 时没有额度信息）');
+      }
+      usageCache = { at: Date.now(), dataAt, windows, notes };
       resolve(usageCache);
     });
   });

@@ -3,6 +3,8 @@
 // 用法: node server.js [--port 8765] [--host 127.0.0.1] [--cwd 项目目录] [--lan] [--no-token] [--open | --no-open]
 'use strict';
 const http = require('http');
+const net = require('net');
+const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -54,6 +56,139 @@ function spawnClaude(cliArgs, opts) {
   return spawn(CLAUDE_BIN, cliArgs, { ...opts, windowsHide: true });
 }
 
+// ============ 出口锁：claude 只走指定代理，出口 IP 不对就拦 ============
+// 配置在 ~/.claude-web/egress.json（bin/egress-init.js 生成），没有这个文件就不启用，行为和以前一样。
+// 三层：① 独立 xray 只有节点一个出站（节点挂了就连不上，不会走本机）② 防火墙只许 claude.exe 连本机（bin/egress-firewall.ps1）
+//       ③ 这里定时经代理查出口 IP：不在允许列表就拦下新消息并停掉正在跑的任务；代理连不上只拦新消息（claude 本来也出不去）
+const EGRESS_FILE = process.env.CLAUDE_WEB_EGRESS || path.join(DATA_DIR, 'egress.json');
+let EGRESS = null;
+try {
+  EGRESS = JSON.parse(fs.readFileSync(EGRESS_FILE, 'utf8'));
+  const u = new URL(EGRESS.proxy);
+  if (u.protocol !== 'http:') throw new Error('proxy 只支持 http://');
+  EGRESS.expectIp = Array.isArray(EGRESS.expectIp) ? EGRESS.expectIp : [];
+  EGRESS.expectCountry = Array.isArray(EGRESS.expectCountry) ? EGRESS.expectCountry.map((c) => String(c).toUpperCase()) : [];
+} catch (e) {
+  if (e.code !== 'ENOENT') { console.error(`\n  ✗ 出口锁配置 ${EGRESS_FILE} 有误：${e.message}\n    为了不走本机 IP，服务不启动。修好或删掉这个文件再试。\n`); process.exit(1); }
+  EGRESS = null;
+}
+const egress = { state: EGRESS ? 'checking' : 'off', ip: '', loc: '', at: 0, error: '' };
+// 启动 claude 用的环境变量：开了出口锁就强制走代理（清掉原有的各种大小写的代理变量再设）
+function claudeEnv(extra) {
+  const env = { ...process.env, ...(extra || {}) };
+  if (!EGRESS) return env;
+  for (const k of Object.keys(env)) if (/^(https?|all|no)_proxy$/i.test(k)) delete env[k];
+  env.HTTPS_PROXY = env.HTTP_PROXY = env.https_proxy = env.http_proxy = EGRESS.proxy;
+  env.NO_PROXY = env.no_proxy = '127.0.0.1,localhost,::1';
+  if (EGRESS.disableNonessential !== false) env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'; // 关掉遥测、错误上报、自动更新
+  return env;
+}
+// 经代理请求一个回显 IP 的地址（CONNECT + TLS，零依赖），返回 { ip, loc }
+function traceViaProxy(target) {
+  return new Promise((resolve, reject) => {
+    const pu = new URL(EGRESS.proxy), tu = new URL(target);
+    const host = tu.hostname, port = +tu.port || 443;
+    let sock = null, done = false;
+    const fin = (err, v) => { if (done) return; done = true; clearTimeout(timer); try { sock && sock.destroy(); } catch {} err ? reject(err) : resolve(v); };
+    const timer = setTimeout(() => fin(new Error('超时')), 12000);
+    const headers = { Host: `${host}:${port}` };
+    if (pu.username) headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(decodeURIComponent(pu.username) + ':' + decodeURIComponent(pu.password)).toString('base64');
+    const req = http.request({ host: pu.hostname.replace(/^\[|\]$/g, ''), port: +pu.port || 80, method: 'CONNECT', path: `${host}:${port}`, headers, agent: false });
+    req.on('connect', (res, socket) => {
+      sock = socket;
+      if (res.statusCode !== 200) return fin(new Error('代理返回 ' + res.statusCode));
+      const s = tls.connect({ socket, servername: host }, () => {
+        s.write(`GET ${tu.pathname}${tu.search} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nUser-Agent: curl/8\r\n\r\n`);
+      });
+      let b = ''; s.on('data', (d) => { b += d; if (b.length > 65536) s.destroy(); });
+      s.on('close', () => {
+        const body = b.split('\r\n\r\n').slice(1).join('\r\n\r\n');
+        let ip = (body.match(/^ip=(\S+)/m) || [])[1] || '';
+        if (!ip) ip = (body.match(/\b(\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]*:[0-9a-f:]+)\b/i) || [])[1] || '';
+        fin(ip ? null : new Error('没拿到 IP'), { ip, loc: ((body.match(/^loc=(\S+)/m) || [])[1] || '').toUpperCase() });
+      });
+      s.on('error', (e) => fin(e));
+    });
+    req.on('error', (e) => fin(e));
+    req.end();
+  });
+}
+const TRACE_URLS = ['https://www.cloudflare.com/cdn-cgi/trace', 'https://api.ipify.org/'];
+let egressChecking = null;
+function checkEgress() {
+  if (!EGRESS) return Promise.resolve(egress);
+  if (egressChecking) return egressChecking;
+  egressChecking = (async () => {
+    // 允许列表每次现读，改了 egress.json 不用重启（proxy / xray 改了要重启）
+    try {
+      const f = JSON.parse(fs.readFileSync(EGRESS_FILE, 'utf8'));
+      if (Array.isArray(f.expectIp)) EGRESS.expectIp = f.expectIp;
+      if (Array.isArray(f.expectCountry)) EGRESS.expectCountry = f.expectCountry.map((c) => String(c).toUpperCase());
+    } catch {}
+    let got = null, err = '';
+    for (const u of [EGRESS.checkUrl, ...TRACE_URLS].filter(Boolean)) {
+      try { got = await traceViaProxy(u); break; } catch (e) { err = (e && e.message) || String(e); }
+    }
+    const prev = egress.state;
+    if (!got) Object.assign(egress, { state: 'down', ip: '', loc: '', error: '连不上代理（' + err + '）' });
+    else {
+      const okIp = !EGRESS.expectIp.length || EGRESS.expectIp.includes(got.ip);
+      const okLoc = !EGRESS.expectCountry.length || !got.loc || EGRESS.expectCountry.includes(got.loc);
+      if (okIp && okLoc) Object.assign(egress, { state: 'ok', ...got, error: '' });
+      else {
+        Object.assign(egress, { state: 'bad', ...got, error: `出口变成了 ${got.ip}${got.loc ? '（' + got.loc + '）' : ''}，不是允许的 ${EGRESS.expectIp.join(', ') || EGRESS.expectCountry.join(', ')}` });
+        stopAllRuns('出口检查没通过，已停止任务：' + egress.error);
+      }
+    }
+    egress.at = Date.now();
+    if (egress.state !== prev) console.log(`  [出口] ${egress.state === 'ok' ? '✓ ' + egress.ip + ' ' + egress.loc : '✗ ' + egress.error}`);
+    return egress;
+  })().finally(() => { egressChecking = null; });
+  return egressChecking;
+}
+function stopAllRuns(reason) {
+  for (const r of runs.values()) {
+    if (r.done) continue;
+    r.push(JSON.stringify({ type: 'web_error', message: reason }));
+    killProc(r.child, true);
+  }
+}
+// 发消息前用：15 秒内检查过且正常就直接放行，否则现查一次
+async function egressReady() {
+  if (!EGRESS) return null;
+  const st = egress.state === 'ok' && Date.now() - egress.at < 15e3 ? egress : await checkEgress();
+  return st.state === 'ok' ? null : st.error || '出口检查没通过';
+}
+// 守护 xray：端口上已经有程序在听（上次没关掉的 xray，或你自己起的代理）就直接用，否则拉起来，退出了自动重启
+let xrayProc = null, xrayOut = '';
+function portOpen(host, port) {
+  return new Promise((resolve) => {
+    const s = net.connect({ host, port });
+    const end = (v) => { s.destroy(); resolve(v); };
+    s.setTimeout(1500, () => end(false)); s.on('connect', () => end(true)); s.on('error', () => end(false));
+  });
+}
+async function superviseXray() {
+  if (!EGRESS || !EGRESS.xray || !EGRESS.xray.bin) return;
+  if (xrayProc && xrayProc.exitCode === null) return;
+  const pu = new URL(EGRESS.proxy);
+  if (await portOpen(pu.hostname.replace(/^\[|\]$/g, ''), +pu.port || 80)) return;
+  try {
+    xrayProc = spawn(EGRESS.xray.bin, ['run', '-c', EGRESS.xray.config], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  } catch (e) { console.error('  [出口] 启动 xray 失败：' + e.message); return; }
+  const keep = (d) => { xrayOut = (xrayOut + d).slice(-3000); };
+  xrayProc.stdout.on('data', keep); xrayProc.stderr.on('data', keep);
+  xrayProc.on('error', (e) => console.error('  [出口] 启动 xray 失败：' + e.message));
+  xrayProc.on('exit', (code) => {
+    console.error(`  [出口] xray 退出（${code}），2 秒后重启。最后的输出：\n${xrayOut.slice(-600)}`);
+    setTimeout(() => superviseXray().then(() => setTimeout(checkEgress, 1500)), 2000);
+  });
+}
+if (EGRESS) {
+  superviseXray().then(() => setTimeout(checkEgress, 1500));
+  setInterval(() => { superviseXray(); checkEgress(); }, Math.max(15, +EGRESS.interval || 60) * 1000);
+}
+
 // 新版 claude 默认 --system-prompt-snapshot on：会话第一次请求时录下系统提示词，之后每轮/每次 --resume 都原样重发，
 // 后来传的 --system-prompt-file 被忽略（改预设、中途开关预设对已有会话都不生效）。
 // 酒馆是每次请求现拼，所以关掉。旧版本不认识这个参数会报错，启动时先看 --help 里有没有。
@@ -63,7 +198,7 @@ function spawnClaude(cliArgs, opts) {
 // --permission-prompt-tool stdio：权限请求（包括 AskUserQuestion 提问）通过 stdin/stdout 交给网页回答。
 let SNAPSHOT_FLAG = false, APPEND_FILE_FLAG = false, THINKING_FLAG = false, PROMPT_TOOL_FLAG = false;
 try {
-  const hc = spawnClaude(['--help'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+  const hc = spawnClaude(['--help'], { stdio: ['ignore', 'pipe', 'pipe'], env: claudeEnv() });
   let ho = ''; hc.stdout.on('data', (d) => { ho += d; });
   hc.on('close', () => {
     SNAPSHOT_FLAG = /--system-prompt-snapshot/.test(ho);
@@ -75,7 +210,7 @@ try {
 // --thinking-display 是隐藏参数，--help 里没有。用空输入试一下：不认识会报 unknown option，
 // 认识的话只会报「没有输入」，不会调用模型
 try {
-  const tc = spawnClaude(['-p', '--thinking-display', 'summarized'], { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
+  const tc = spawnClaude(['-p', '--thinking-display', 'summarized'], { stdio: ['ignore', 'pipe', 'pipe'], env: claudeEnv() });
   let te = ''; tc.stdout.on('data', (d) => { te += d; }); tc.stderr.on('data', (d) => { te += d; });
   tc.on('close', () => { THINKING_FLAG = te.length > 0 && !/unknown option/i.test(te); });
   tc.on('error', () => {});
@@ -315,7 +450,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   } else {
     cliArgs.push('--append-system-prompt', WEB_PROMPT);
   }
-  const env ={ ...process.env };
+  const env = claudeEnv();
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
 
@@ -429,8 +564,9 @@ function streamRun(r, from, req, res) {
 let usageCache = null;
 function getUsage(force) {
   if (!force && usageCache && Date.now() - usageCache.at < 60e3) return Promise.resolve(usageCache);
+  if (EGRESS && egress.state !== 'ok') return Promise.resolve({ at: Date.now(), windows: [], notes: ['出口检查没通过，暂不查询用量'] });
   return new Promise((resolve) => {
-    const child = spawnClaude(['-p', '/usage', '--no-session-persistence'], { cwd: DATA_DIR, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnClaude(['-p', '/usage', '--no-session-persistence'], { cwd: DATA_DIR, env: claudeEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
@@ -731,7 +867,13 @@ const server = http.createServer(async (req, res) => {
           cwd, name: path.basename(cwd) || cwd, startCwd: START_CWD,
           running: r ? { id: r.id, sessionId: r.sessionId } : null,
           busyProjects: [...runs.values()].filter((x) => !x.done).map((x) => x.cwd),
+          egress,
         });
+      }
+      case '/api/egress': {
+        // 出口状态；force=1 立刻重查
+        if (q('force') === '1') await checkEgress();
+        return json(res, 200, { ...egress, expectIp: EGRESS ? EGRESS.expectIp : [], proxy: EGRESS ? EGRESS.proxy : '' });
       }
       case '/api/usage':
         return json(res, 200, await getUsage(q('force') === '1'));
@@ -877,6 +1019,8 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const cwd = checkDir(body.cwd);
         if (activeRun(cwd)) return json(res, 409, { error: '这个项目上一条消息还在处理中' });
+        const egressErr = await egressReady();
+        if (egressErr) return json(res, 503, { error: '出口检查没通过，这条消息没有发出：' + egressErr, egress });
         const attachments = (Array.isArray(body.attachments) ? body.attachments : [])
           .filter((a) => a && typeof a.path === 'string' && path.resolve(a.path).startsWith(UPLOAD_DIR + path.sep))
           .map((a) => ({ path: path.resolve(a.path), name: path.basename(String(a.name || a.path)) }));
@@ -978,7 +1122,11 @@ function lanIp() {
   }
   return best || '127.0.0.1';
 }
-const shutdown = () => { for (const r of runs.values()) if (!r.done) killProc(r.child, true); process.exit(0); };
+const shutdown = () => {
+  for (const r of runs.values()) if (!r.done) killProc(r.child, true);
+  if (xrayProc) { xrayProc.removeAllListeners('exit'); killProc(xrayProc, true); }
+  process.exit(0);
+};
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 listen();

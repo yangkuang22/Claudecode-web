@@ -30,6 +30,7 @@
 | bypassPermissions | root 用户下 Claude Code 默认禁止，服务端自动加环境变量 `IS_SANDBOX=1` |
 | 思考显示 | `--thinking-display summarized/highlights/omitted`（隐藏参数，--help 里没有，启动时用 `claude -p --thinking-display summarized` 空输入探测）。不加时 claude 默认 omitted，思考块是空的 |
 | 中途提问 / 操作审批 | `--permission-prompt-tool stdio`：需要人回答时 claude 输出 `control_request`（subtype `can_use_tool`）并暂停。stdin 保持打开，收到 `result` 再关（不关 claude 不退出）。`/api/answer` 写回 `control_response`：AskUserQuestion 是 `allow` + `updatedInput.answers = {问题原文: 答案}`（多选用 `, ` 连接），其它工具 `allow` 原样 input 或 `deny` + message。updatedInput 用服务端记下的原始 input。回答后往输出流推 `web_ask_done`，重放时前端据此关卡片。bypass 模式下 AskUserQuestion 照样会问 |
+| 出口锁 | `~/.claude-web/egress.json`（或 `CLAUDE_WEB_EGRESS`）存在才启用，格式错误直接退出。所有 claude 子进程（含 --help / 思考参数探测 / /usage）都用 `claudeEnv()` 起：清掉各种大小写的 *_proxy 再设成 egress.proxy。`superviseXray()` 端口没人听才拉起 xray，退出 2 秒后重启。`checkEgress()` 经代理 CONNECT + TLS 请求 cloudflare trace（备用 ipify），状态 ok/down/bad；bad 时 `stopAllRuns()`，down 只拦新消息。/api/chat 发之前 `egressReady()`（15 秒内的 ok 结果直接用），不通过返回 503。实测 claude 在代理不通时会一直重试，不会直连。`bin/egress-init.js` 生成配置，`bin/egress-firewall.ps1` 加防火墙规则（PowerShell 5.1 要 UTF-8 BOM） |
 | 访问控制 | 只监听 127.0.0.1 时不需要令牌；`--lan` 时启用固定令牌（`~/.claude-web/token`） |
 
 ## 预设（酒馆 ST 格式，`presets/*.json`，不进仓库）

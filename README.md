@@ -13,6 +13,7 @@
 | 流式聊天 | 逐字输出，Markdown / 表格 / 代码块（一键复制），工具调用折叠卡片，思考过程 |
 | 思考过程显示 | 工具栏「思考」按钮切换：显示摘要 / 只看标题 / 不显示（Claude Code 默认不返回思考内容） |
 | 中途提问 | Claude 跑到一半想问你时（AskUserQuestion）弹出卡片：点选项或自己输入，提交后接着跑 |
+| 出口锁 | 可选：claude 只走指定代理，出口 IP 不对就拦消息、停任务（见下方「出口锁」） |
 | 操作审批 | 非 bypass 模式下，需要确认的命令 / 改文件弹出「允许 / 拒绝」卡片，拒绝时可以附上原因 |
 | 智能滚动 | 往上滑就停止自动跟随，方便边出字边阅读；点 ↓ 或滑回底部恢复 |
 | 断线续传 | 手机锁屏、切后台不会中断，回来自动接上 |
@@ -101,6 +102,35 @@ ln -sf ~/claude-web/index.html ~/.claude-web/index.html
 
 - 选 **bypassPermissions（全部允许）** 时，Claude 可以直接执行任何命令、修改任何文件，请确认你信任当前任务
 - 在 Linux 上以 root 运行时（比如 Termux proot），Claude Code 默认不允许 bypassPermissions，本工具会自动设置 `IS_SANDBOX=1` 解除这个限制
+
+## 出口锁（可选：保证 claude 只从指定 IP 出去）
+
+代理偶尔会挂（比如 v2rayN 的 TUN 模式崩了），这时 claude 可能悄悄走本机网络。出口锁分三层，任何一层失效其它层还能兜住：
+
+| 层 | 作用 | 挂了会怎样 |
+|---|---|---|
+| ① 专用 xray | claude-web 自己拉起一个 xray，只监听 `127.0.0.1:10900`，**只有你的节点一个出站，没有 direct**；所有 claude 进程强制设置 `HTTPS_PROXY` | 节点不通 → 请求失败，不会换路；xray 退出会自动重启 |
+| ② 防火墙 | Windows 防火墙规则：`claude.exe` 只能连 127.0.0.1 / ::1（IPv4、IPv6 都封） | 就算某个模块不认代理变量、TUN 挂了，也连不出去 |
+| ③ 出口检查 | 每 60 秒、每次发消息前经代理查一次出口 IP | IP 不在允许列表 → 拦下消息并**立刻停掉正在跑的任务**；代理不通 → 拦下新消息 |
+
+设置步骤（Windows）：
+
+```
+node bin\egress-init.js --expect-ip 你的出口IP --country US
+```
+
+- 从 v2rayN 正在用的配置（默认 `F:\v2rayN-windows-64\binConfigs\config.json`，可用 `--from` 指定）取出 tag 为 `proxy` 的节点，生成 `~/.claude-web/egress/xray.json` 和 `~/.claude-web/egress.json`（含节点密钥，不在仓库里）
+- 会实际测一次出口 IP；不给 `--expect-ip` 时把测到的 IP 写进允许列表，请确认它就是你要的 IP
+- 然后**以管理员身份**双击 `bin\egress-firewall.bat` 加防火墙规则（`egress-firewall.bat -Remove` 删除）
+- 重启 claude-web。工具栏最左边出现「出口 ✓ US x.x.x.x」，红色表示异常，点一下立刻重查
+
+注意：
+
+- 防火墙规则对**所有** claude.exe 生效，包括终端里直接运行的 claude。终端里也要用的话，在 `~/.claude/settings.json` 里加 `"env": {"HTTPS_PROXY": "http://127.0.0.1:10900", "HTTP_PROXY": "http://127.0.0.1:10900"}`
+- 防火墙只管 claude.exe 本身。Claude 执行的 git / curl / npm 等是别的程序，不受规则限制（它们会继承代理变量，但不保证都认）
+- 允许列表（`egress.json` 里的 `expectIp` / `expectCountry`）改了立即生效；改 `proxy` / `xray` 要重启 claude-web
+- `egress.json` 格式有误时服务拒绝启动（宁可不用，也不走本机 IP）；删掉这个文件就关闭出口锁
+- 开启后默认设置 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`（关遥测、错误上报、自动更新），不想要就在 `egress.json` 里设 `"disableNonessential": false`
 
 ## 安全说明
 

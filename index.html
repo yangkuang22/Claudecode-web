@@ -254,6 +254,8 @@ textarea {
 }
 .pill b { color: var(--text); font-weight: 500; }
 .pill.warn b { color: var(--accent); }
+.pill.eg-ok b { color: var(--ok); }
+.pill.eg-bad { border-color: var(--err); } .pill.eg-bad b { color: var(--err); }
 .pill .bar { width: 34px; height: 5px; border-radius: 3px; background: var(--bubble); overflow: hidden; }
 .pill .bar i { display: block; height: 100%; background: var(--ok); }
 .opt { display: flex; width: 100%; align-items: center; gap: 10px; text-align: left; background: none; border: 0; padding: 11px 12px; border-radius: 10px; }
@@ -407,6 +409,7 @@ textarea {
   <div class="edit-bar" id="editBar" hidden><span>✎ 正在编辑之前的消息：发送后从这条消息重新开始，后面的对话会被删除（Claude 改过的文件不会还原）</span><button class="btn" id="editCancel">取消</button></div>
   <div class="cmd-menu" id="cmdMenu" hidden></div>
   <div class="toolbar">
+    <button class="pill" id="egressPill" hidden>出口 <b></b></button>
     <button class="pill" id="cmdPill"><b>/</b> 指令</button>
     <button class="pill" id="modelPill">模型 <b></b></button>
     <button class="pill" id="effortPill">effort <b></b></button>
@@ -999,6 +1002,7 @@ async function send() {
     S.turn.querySelector('.working')?.remove();
     const j = await res.json().catch(() => ({}));
     notice(j.error || '请求失败 ' + res.status, true);
+    if (j.egress) renderEgress(j.egress);
     return setRunning(false);
   }
   S.runId = res.headers.get('X-Run-Id'); S.lineCount = 0;
@@ -1463,6 +1467,31 @@ chat.addEventListener('click', async (e) => {
   catch { const t = el('textarea'); t.value = code; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
   b.textContent = '已复制'; setTimeout(() => (b.textContent = '复制'), 1500);
 });
+
+// ================= 出口锁状态 =================
+// 服务端配了 egress.json 才显示。绿色 = 出口 IP 在允许列表；红色 = 代理连不上或出口不对，消息会被服务端拦下
+const EG_TEXT = { ok: '✓', checking: '检查中…', down: '✗ 代理不通', bad: '✗ IP 不对' };
+function renderEgress(e) {
+  const p = $('egressPill');
+  if (!e || e.state === 'off') { p.hidden = true; return; }
+  S.egress = e; p.hidden = false;
+  p.querySelector('b').textContent = e.state === 'ok' ? `✓ ${e.loc || ''} ${e.ip}`.replace('  ', ' ') : EG_TEXT[e.state] || e.state;
+  p.classList.toggle('eg-ok', e.state === 'ok');
+  p.classList.toggle('eg-bad', e.state === 'down' || e.state === 'bad');
+  p.title = e.state === 'ok' ? '出口 IP 正常，点击重新检查' : (e.error || '') + '（点击重新检查）';
+}
+async function refreshEgress(force) {
+  try { renderEgress(await getJSON('/api/egress' + (force ? '?force=1' : ''))); } catch {}
+}
+$('egressPill').onclick = async () => {
+  $('egressPill').querySelector('b').textContent = EG_TEXT.checking;
+  await refreshEgress(true);
+  const e = S.egress || {};
+  toast(e.state === 'ok' ? `出口正常：${e.ip}（${e.loc || '未知地区'}）` : '出口异常：' + (e.error || e.state));
+};
+refreshEgress();
+setInterval(() => { if (!document.hidden) refreshEgress(); }, 20000);
+addEventListener('visibilitychange', () => { if (!document.hidden) refreshEgress(); });
 
 // ================= 模型 / effort / 权限 / 用量 =================
 // 模型列表来自 Claude Code 2.1.294 内置的模型表；老模型账号不一定能用，用不了会在回复里报错

@@ -14,6 +14,7 @@
 //   CODEX_WRITE       0 = 只允许只读（Claude 处于 plan 模式时）
 'use strict';
 const { spawn } = require('child_process');
+const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -23,6 +24,25 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 const DEF_EFFORT = EFFORTS.includes(process.env.CODEX_EFFORT) ? process.env.CODEX_EFFORT : 'high';
 const WRITE_OK = process.env.CODEX_WRITE !== '0';
 const MAX_OUT = 24000; // 返回给 Claude 的最大字符数，太长会占 Claude 的上下文
+const SUMMARY = process.env.CODEX_REASONING_SUMMARY || 'detailed'; // 让 GPT 返回思考摘要（默认 none 不返回）
+
+// 把 Codex 的过程（思考摘要 / 说的话 / 运行的命令 / 改的文件）实时发给 claude-web 显示，按顺序一条条发
+// CLAUDE_WEB_EVENTS 由 claude-web 设置；没有就不发（单独测试时）
+let evQueue = Promise.resolve();
+function emit(toolUseId, ev) {
+  const url = process.env.CLAUDE_WEB_EVENTS;
+  if (!url) return;
+  const body = JSON.stringify({ toolUseId: toolUseId || '', ...ev });
+  evQueue = evQueue.then(() => new Promise((resolve) => {
+    try {
+      const u = new URL(url);
+      const req = http.request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method: 'POST', agent: false,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, timeout: 5000 }, (res) => { res.resume(); res.on('end', resolve); });
+      req.on('error', resolve); req.on('timeout', () => { req.destroy(); resolve(); });
+      req.end(body);
+    } catch { resolve(); }
+  }));
+}
 
 function codexCmd() {
   const b = process.env.CODEX_BIN || 'codex';
@@ -68,12 +88,12 @@ function brief({ task, context, files, done_criteria, mode }) {
 
 // ---------- 运行 codex exec ----------
 const running = new Map(); // JSON-RPC id -> child
-function runCodex(rpcId, { prompt, threadId, effort, write }, onProgress) {
+function runCodex(rpcId, { prompt, threadId, effort, write, toolUseId }, onProgress) {
   return new Promise((resolve) => {
     const [cmd, pre] = codexCmd();
     const outFile = path.join(os.tmpdir(), `codex-last-${process.pid}-${Date.now()}.txt`);
     const common = ['--json', '--skip-git-repo-check', '-m', MODEL,
-      '-c', `model_reasoning_effort="${effort}"`, '-c', 'model_verbosity="medium"', '-o', outFile];
+      '-c', `model_reasoning_effort="${effort}"`, '-c', 'model_verbosity="medium"', '-c', `model_reasoning_summary="${SUMMARY}"`, '-o', outFile];
     const args = threadId
       ? [...pre, 'exec', 'resume', ...common, threadId, '-']
       : [...pre, 'exec', ...common, '-s', write ? 'workspace-write' : 'read-only', '-C', process.cwd(), '-'];
@@ -81,6 +101,7 @@ function runCodex(rpcId, { prompt, threadId, effort, write }, onProgress) {
     try { child = spawn(cmd, args, { cwd: process.cwd(), env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
     catch (e) { return resolve({ error: '启动 codex 失败：' + e.message }); }
     running.set(rpcId, child);
+    emit(toolUseId, { kind: 'start', text: `${MODEL} · 思考强度 ${effort} · ${threadId ? '追问 ' + threadId : write ? '可改文件' : '只读'}` });
     const st = { thread: threadId || '', messages: [], commands: [], files: new Set(), errors: [], usage: null };
     let buf = '', err = '';
     child.stdout.on('data', (d) => {
@@ -90,16 +111,30 @@ function runCodex(rpcId, { prompt, threadId, effort, write }, onProgress) {
         let e; try { e = JSON.parse(l); } catch { continue; }
         if (e.type === 'thread.started' && e.thread_id) st.thread = e.thread_id;
         else if (e.type === 'turn.completed') st.usage = e.usage || null;
-        else if (e.type === 'turn.failed' || e.type === 'error') st.errors.push((e.error && e.error.message) || e.message || JSON.stringify(e).slice(0, 300));
+        else if (e.type === 'turn.failed' || e.type === 'error') {
+          const m = (e.error && e.error.message) || e.message || JSON.stringify(e).slice(0, 300);
+          st.errors.push(m); emit(toolUseId, { kind: 'error', text: m });
+        }
         const it = e.item;
         if (!it || e.type !== 'item.completed') {
-          if (it && e.type === 'item.started' && it.type === 'command_execution') onProgress('运行命令：' + String(it.command || '').slice(0, 120));
+          if (it && e.type === 'item.started' && it.type === 'command_execution') {
+            onProgress('运行命令：' + String(it.command || '').slice(0, 120));
+            emit(toolUseId, { kind: 'cmd_start', id: it.id, text: String(it.command || '') });
+          }
           continue;
         }
-        if (it.type === 'agent_message' && it.text) { st.messages.push(it.text); onProgress(it.text.slice(0, 160)); }
-        else if (it.type === 'command_execution') st.commands.push({ cmd: String(it.command || ''), code: it.exit_code });
-        else if (it.type === 'file_change' && Array.isArray(it.changes)) for (const c of it.changes) st.files.add(`${c.kind || 'update'} ${c.path}`);
-        else if (it.type === 'error' && it.message) st.errors.push(it.message);
+        if (it.type === 'agent_message' && it.text) { st.messages.push(it.text); onProgress(it.text.slice(0, 160)); emit(toolUseId, { kind: 'message', text: it.text }); }
+        else if (it.type === 'reasoning') {
+          const t = it.text || (Array.isArray(it.summary) ? it.summary.map((x) => x.text || x).join('\n') : it.summary) || '';
+          if (t) { onProgress('思考：' + String(t).slice(0, 140)); emit(toolUseId, { kind: 'reasoning', text: String(t) }); }
+        } else if (it.type === 'command_execution') {
+          st.commands.push({ cmd: String(it.command || ''), code: it.exit_code });
+          emit(toolUseId, { kind: 'cmd', id: it.id, text: String(it.command || ''), code: it.exit_code, output: String(it.aggregated_output || '').slice(-3000) });
+        } else if (it.type === 'file_change' && Array.isArray(it.changes)) {
+          for (const c of it.changes) st.files.add(`${c.kind || 'update'} ${c.path}`);
+          emit(toolUseId, { kind: 'files', text: it.changes.map((c) => `${c.kind || 'update'} ${c.path}`).join('\n') });
+        } else if (it.type === 'web_search' && it.query) emit(toolUseId, { kind: 'search', text: it.query });
+        else if (it.type === 'error' && it.message) { st.errors.push(it.message); emit(toolUseId, { kind: 'error', text: it.message }); }
       }
     });
     child.stderr.on('data', (d) => { err = (err + d).slice(-4000); });
@@ -109,6 +144,7 @@ function runCodex(rpcId, { prompt, threadId, effort, write }, onProgress) {
       let last = '';
       try { last = fs.readFileSync(outFile, 'utf8').trim(); fs.rmSync(outFile, { force: true }); } catch {}
       if (!last) last = st.messages[st.messages.length - 1] || '';
+      emit(toolUseId, { kind: 'end', code, text: st.usage ? `输入 ${st.usage.input_tokens || 0}（缓存 ${st.usage.cached_input_tokens || 0}）· 输出 ${st.usage.output_tokens || 0} tokens` : '' });
       resolve({ code, last, st, stderr: err });
     });
     child.stdin.on('error', () => {});
@@ -180,6 +216,7 @@ const fail = (id, code, message) => send({ jsonrpc: '2.0', id, error: { code, me
 async function callTool(id, params) {
   const a = params.arguments || {};
   const token = params._meta && params._meta.progressToken;
+  const toolUseId = params._meta && params._meta['claudecode/toolUseId'];
   let n = 0;
   const progress = (msg) => { if (token != null) send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken: token, progress: ++n, message: msg } }); };
   const effort = EFFORTS.includes(a.effort) ? a.effort : DEF_EFFORT;
@@ -188,12 +225,12 @@ async function callTool(id, params) {
     if (!a.task || !String(a.task).trim()) return reply(id, { content: [{ type: 'text', text: 'task 不能为空' }], isError: true });
     write = a.mode === 'write' && WRITE_OK;
     if (a.mode === 'write' && !WRITE_OK) progress('当前是只读模式（plan），Codex 不能改文件');
-    r = await runCodex(id, { prompt: brief(a), effort, write }, progress);
+    r = await runCodex(id, { prompt: brief(a), effort, write, toolUseId }, progress);
     if (a.mode === 'write' && !WRITE_OK) r.last = '（注意：当前权限模式只读，Codex 以只读方式运行，没有修改文件）\n\n' + (r.last || '');
   } else if (params.name === 'codex_continue') {
     if (!/^[\w-]{8,}$/.test(a.thread_id || '')) return reply(id, { content: [{ type: 'text', text: 'thread_id 无效' }], isError: true });
     write = WRITE_OK;
-    r = await runCodex(id, { prompt: String(a.message || ''), threadId: a.thread_id, effort, write }, progress);
+    r = await runCodex(id, { prompt: String(a.message || ''), threadId: a.thread_id, effort, write, toolUseId }, progress);
   } else return fail(id, -32602, 'unknown tool: ' + params.name);
   const out = report(r, write);
   reply(id, { content: [{ type: 'text', text: out.text }], isError: out.isError });

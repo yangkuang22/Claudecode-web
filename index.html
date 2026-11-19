@@ -138,6 +138,25 @@ details.thinking .tb { padding: 6px 12px 10px; color: var(--muted); white-space:
 .meta { font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
 .notice { font-size: 13px; padding: 8px 12px; border-radius: 8px; margin: 8px 0; background: var(--warn-bg); color: var(--warn); white-space: pre-wrap; word-break: break-word; }
 .notice.err { color: var(--err); }
+/* Codex（GPT）子代理卡片：绿色左边框 + GPT 标记，里面是 GPT 的过程 */
+details.tool.codex { border-left: 3px solid #10a37f; }
+.gpt-badge { font-size: 10.5px; font-weight: 700; color: #fff; background: #10a37f; border-radius: 4px; padding: 0 5px; margin-right: 6px; letter-spacing: .3px; }
+.cx-sec { font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+.cx-brief { border: 1px dashed var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+.cx-brief b { color: var(--muted); font-weight: 500; margin-right: 4px; }
+.cx-brief div { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
+.cx-log { border-left: 2px solid #10a37f55; padding-left: 10px; font-size: 13px; }
+.cx-ev { margin: 4px 0; white-space: pre-wrap; word-break: break-word; }
+.cx-ev.reasoning { color: var(--muted); font-style: italic; }
+.cx-ev.reasoning::before { content: "💭 "; font-style: normal; }
+.cx-ev.cmd { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.cx-ev.cmd .ok { color: var(--ok); } .cx-ev.cmd .err { color: var(--err); }
+.cx-ev.cmd details summary { cursor: pointer; list-style: none; }
+.cx-ev.cmd pre { max-height: 200px; overflow: auto; background: var(--code-bg); padding: 6px; border-radius: 4px; margin-top: 3px; }
+.cx-ev.meta, .cx-ev.start { color: var(--muted); font-size: 12px; }
+.cx-ev.error { color: var(--err); }
+.cx-result { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 6px; }
+
 /* 中途提问 / 操作审批卡片 */
 .ask { margin: 10px 0; border: 1px solid var(--accent); border-radius: 10px; background: var(--panel); padding: 12px; font-size: 14px; }
 .ask-h { font-weight: 600; color: var(--accent); margin-bottom: 8px; }
@@ -703,15 +722,29 @@ function toolInputHtml(name, inp) {
     const add = String(inp.new_string || '').split('\n').map((l) => `<span class="diff-add">+ ${esc(l)}</span>`).join('\n');
     return `<pre class="tin">${clip(del + '\n' + add, 20000)}</pre>`;
   }
+  if (name === 'mcp__codex__codex_task' || name === 'mcp__codex__codex_continue') {
+    const row = (k, v) => (v ? `<div><b>${k}</b>${esc(Array.isArray(v) ? v.join('、') : String(v))}</div>` : '');
+    return '<div class="cx-sec">Claude 交给 GPT 的任务书</div><div class="cx-brief">'
+      + row('任务', inp.task || inp.message) + row('背景', inp.context) + row('相关文件', inp.files) + row('完成标准', inp.done_criteria)
+      + row('方式', inp.mode === 'write' ? '可以改文件' : inp.mode ? '只读' : '') + row('思考强度', inp.effort) + row('接着', inp.thread_id) + '</div>';
+  }
   if (name === 'Bash') return `<pre class="tin">$ ${esc(inp.command || '')}</pre>`;
   if (name === 'Write') return `<pre class="tin">${esc(clip(String(inp.content || ''), 6000))}</pre>`;
   return `<pre class="tin">${esc(clip(JSON.stringify(inp, null, 2), 6000))}</pre>`;
 }
-const TOOL_LABEL = { mcp__codex__codex_task: '⚙ Codex 子代理', mcp__codex__codex_continue: '⚙ Codex 追问' };
+const TOOL_LABEL = { mcp__codex__codex_task: 'Codex 子代理', mcp__codex__codex_continue: 'Codex 追问' };
+const isCodexTool = (n) => n === 'mcp__codex__codex_task' || n === 'mcp__codex__codex_continue';
 function addTool(id, name, inp) {
-  const d = el('details', 'tool');
-  d.innerHTML = `<summary><span class="tname">${esc(TOOL_LABEL[name] || name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary><div class="tbody"></div>`;
+  const cx = isCodexTool(name);
+  const d = el('details', 'tool' + (cx ? ' codex' : ''));
+  d.innerHTML = `<summary>${cx ? '<span class="gpt-badge">GPT</span>' : ''}<span class="tname">${esc(TOOL_LABEL[name] || name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary>`
+    + (cx ? '<div class="tbody"><div class="cx-in"></div><div class="cx-sec">GPT 的过程（思考摘要 / 命令 / 说明）</div><div class="cx-log"></div></div>' : '<div class="tbody"></div>');
   d._name = name; d._json = '';
+  if (cx && id) {
+    d._id = id;
+    // 翻看历史时，第一次展开才去取过程记录
+    d.addEventListener('toggle', () => { if (d.open && !d._traceLoaded && !d._live) loadCodexTrace(d); });
+  }
   if (inp) setToolInput(d, inp);
   if (name === 'TodoWrite') d.open = true;
   ensureTurn().appendChild(d);
@@ -719,21 +752,67 @@ function addTool(id, name, inp) {
   return d;
 }
 function setToolInput(d, inp) {
-  d.querySelector('.targ').textContent = toolArg(d._name, inp).split('\n')[0];
-  d.querySelector('.tbody').innerHTML = toolInputHtml(d._name, inp);
+  d._inp = inp;
+  if (!d._live) d.querySelector('.targ').textContent = toolArg(d._name, inp).split('\n')[0];
+  (d.querySelector('.cx-in') || d.querySelector('.tbody')).innerHTML = toolInputHtml(d._name, inp);
 }
 function setToolResult(id, content, isError) {
   const d = S.cards.get(id); if (!d) return;
   const st = d.querySelector('.tstat');
   st.className = 'tstat ' + (isError ? 'err' : 'ok'); st.textContent = isError ? '✗' : '✓';
   const txt = resultText(content).trim();
-  if (txt) { const p = el('pre', 'tout' + (isError ? ' err' : '')); p.textContent = clip(txt, 8000); d.querySelector('.tbody').appendChild(p); }
+  if (txt && isCodexTool(d._name)) {
+    // GPT 的最终汇报（这是 Claude 收到的全部内容）
+    const [rep, meta] = txt.split('\n\n---\n');
+    const w = el('div', 'cx-result'); w.innerHTML = '<div class="cx-sec">GPT 交回给 Claude 的汇报</div>';
+    const m = el('div', 'md'); m.innerHTML = md(rep); w.appendChild(m);
+    if (meta) { const x = el('pre', 'tout'); x.textContent = clip(meta, 4000); w.appendChild(x); }
+    d.querySelector('.tbody').appendChild(w);
+    d.querySelector('.targ').textContent = toolArg(d._name, d._inp || {}).split('\n')[0] || d.querySelector('.targ').textContent;
+    d._live = false;
+  } else if (txt) { const p = el('pre', 'tout' + (isError ? ' err' : '')); p.textContent = clip(txt, 8000); d.querySelector('.tbody').appendChild(p); }
   // Read 读图片时结果里带着图片本身，直接显示
   if (Array.isArray(content)) for (const b of content) {
     if (b.type === 'image' && b.source?.type === 'base64' && /^image\//.test(b.source.media_type || '')) {
       const img = el('img', 'md-media'); img.src = `data:${b.source.media_type};base64,${b.source.data}`; d.querySelector('.tbody').appendChild(img);
     }
   }
+}
+// Codex 的过程事件（来自 codex-mcp.js → /api/codex-event → web_codex）
+function addCodexEvent(ev, card) {
+  // 去掉 Windows 上每条命令前面的 "C:\...\powershell.exe" -Command 外壳，只显示命令本身
+  if (ev.kind === 'cmd' || ev.kind === 'cmd_start') ev = { ...ev, text: String(ev.text || '').replace(/^"?[^"]*[\\/](?:powershell|pwsh|cmd)(?:\.exe)?"?\s+(?:-NoProfile\s+)?(?:-Command|\/c)\s+/i, '') };
+  let d = card || (ev.tool_use_id && S.cards.get(ev.tool_use_id));
+  if (!d) d = [...S.cards.values()].reverse().find((x) => isCodexTool(x._name) && x.querySelector('.tstat .spin'));
+  if (!d) return;
+  const log = d.querySelector('.cx-log'); if (!log) return;
+  const add = (cls, text) => { const e = el('div', 'cx-ev ' + cls); e.textContent = text; log.appendChild(e); return e; };
+  if (!card) { d._live = true; d._traceLoaded = true; }
+  const live = (t) => { if (!card) d.querySelector('.targ').textContent = 'GPT：' + t.replace(/\s+/g, ' ').slice(0, 120); };
+  switch (ev.kind) {
+    case 'start': add('start', '▶ ' + ev.text); live('开始工作…'); break;
+    case 'reasoning': add('reasoning', ev.text); live('💭 ' + ev.text); break;
+    case 'message': { const e = el('div', 'cx-ev md'); e.innerHTML = md(ev.text); log.appendChild(e); live(ev.text); break; }
+    case 'cmd_start': { const e = add('cmd', ''); e.dataset.id = ev.id || ''; e.innerHTML = `<span class="spin"></span> $ ${esc(ev.text.slice(0, 300))}`; live('$ ' + ev.text); break; }
+    case 'cmd': {
+      let e = ev.id ? log.querySelector(`.cx-ev.cmd[data-id="${CSS.escape(ev.id)}"]`) : null;
+      if (!e) e = add('cmd', '');
+      const ok = ev.code === 0;
+      e.innerHTML = `<details><summary><span class="${ok ? 'ok' : 'err'}">${ok ? '✓' : '✗ ' + (ev.code ?? '?')}</span> $ ${esc(ev.text.slice(0, 300))}</summary>${ev.output ? `<pre>${esc(ev.output)}</pre>` : ''}</details>`;
+      break;
+    }
+    case 'files': add('meta', '📝 改了文件：\n' + ev.text); break;
+    case 'search': add('meta', '🔍 搜索：' + ev.text); break;
+    case 'error': add('error', '⚠ ' + ev.text); break;
+    case 'end': add('meta', '■ 结束' + (ev.text ? ' · ' + ev.text : '')); break;
+  }
+  if (!card) scrollDown();
+}
+async function loadCodexTrace(d) {
+  d._traceLoaded = true;
+  let evs = []; try { evs = await getJSON('/api/codex-trace?id=' + encodeURIComponent(d._id)); } catch {}
+  if (!evs.length) { const log = d.querySelector('.cx-log'); if (log && !log.children.length) log.innerHTML = '<div class="cx-ev meta">（没有记录到过程）</div>'; return; }
+  for (const ev of evs) addCodexEvent(ev, d);
 }
 function notice(text, err) { const n = el('div', 'notice' + (err ? ' err' : '')); n.textContent = text; ensureTurn().appendChild(n); scrollDown(); }
 
@@ -878,6 +957,7 @@ function handle(ev) {
       return;
     case 'control_cancel_request': return closeAsk(ev.request_id, '已取消');
     case 'web_ask_done': return closeAsk(ev.request_id, ev.behavior === 'allow' ? (ev.answers ? '已回答' : '已允许') : '已拒绝 / 跳过', ev.answers);
+    case 'web_codex': return addCodexEvent(ev);
     case 'web_error': return notice(ev.message, true);
     case 'web_done': refreshUsage(); return onDone(ev);
   }

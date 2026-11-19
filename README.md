@@ -113,6 +113,7 @@ ln -sf ~/claude-web/index.html ~/.claude-web/index.html
 - Codex 的工作（读文件、跑命令、改代码）用的是 ChatGPT 订阅额度；Claude 只花写委派说明和读汇报的那部分
 - 权限：plan 模式下 Codex 只读；default 模式下每次委派会弹框确认；其它模式自动放行
 - 预设只影响 Claude，不影响 Codex 的任务书
+- 怎么区分：带绿色边框和「GPT」标记的「Codex 子代理」卡片里是 GPT 的内容（Claude 写的任务书、GPT 的思考摘要、运行的命令、改的文件、最后交回的汇报），实时更新；卡片外面的文字、思考过程和其它工具调用都是 Claude 的
 - Codex 账号：「子代理 → Codex 账号」添加，每个账号一个 `CODEX_HOME` 目录，弹窗里 `codex login` 登录一次，切换不登出
 - 开了出口锁时 Codex 也走同一个代理（继承 `HTTPS_PROXY`），但防火墙规则只管 claude.exe，不管 codex
 

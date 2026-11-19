@@ -233,18 +233,33 @@ function codexModels() {
   return [];
 }
 // 给 claude 的 MCP 配置文件
-function codexMcpConfig(sub, permissionMode, tmpFile) {
+function codexMcpConfig(sub, permissionMode, tmpFile, runId, eventKey) {
   const acct = getCodexAccount(sub.account) || CODEX_DEFAULT;
   const env = { CODEX_BIN, CODEX_MODEL: sub.model, CODEX_EFFORT: sub.effort || 'high', CODEX_WRITE: permissionMode === 'plan' ? '0' : '1' };
   if (!acct.isDefault) env.CODEX_HOME = acct.dir;
+  // Codex 的过程实时发回网页（/api/codex-event）
+  const host = ['0.0.0.0', '::', 'localhost'].includes(HOST) ? '127.0.0.1' : HOST;
+  env.CLAUDE_WEB_EVENTS = `http://${host}:${PORT}/api/codex-event?` + new URLSearchParams({ run: runId, k: eventKey, ...(TOKEN ? { t: TOKEN } : {}) });
+  // alwaysLoad：工具说明直接放进 Claude 的工具列表。不加的话 MCP 工具被放进「延迟加载」，
+  // Claude 只看到名字、要先 ToolSearch 才知道怎么用，实际几乎不会去用。
   // timeout：单次调用的硬上限（毫秒）。Codex 做大任务可能要很久
-  return tmpFile(JSON.stringify({ mcpServers: { codex: { type: 'stdio', command: process.execPath, args: [CODEX_MCP], env, timeout: 3600000 } } }));
+  return tmpFile(JSON.stringify({ mcpServers: { codex: { type: 'stdio', command: process.execPath, args: [CODEX_MCP], env, timeout: 3600000, alwaysLoad: true } } }));
 }
-const CODEX_LEAD_PROMPT = '\n\n# 子代理\n本会话的子代理由 Codex（OpenAI GPT 模型）担任，Claude 自带的 Task / Agent 子代理已关闭。'
-  + '需要委派的工作用 mcp__codex__codex_task：大范围搜索和阅读代码、按明确要求实现改动、跑测试排查问题、独立复查。'
-  + '委派时 Codex 看不到这段对话，参数里要写清目标、背景（用户要什么、已知信息、约定）、相关文件和完成标准；只调查就用 mode=read，要改文件用 mode=write。'
-  + '简单、几步就能做完的事自己做，不要委派。Codex 返回后，关键结论自己抽查核实再告诉用户；需要补充或返工时用 mcp__codex__codex_continue 接着同一个 thread_id。'
-  + '可以一次发出多个互不相关的 codex_task 并行处理。';
+// Codex 过程记录：每次委派一个文件（按 Claude 的 tool_use_id），翻看历史会话时用
+const CODEX_TRACE_DIR = path.join(DATA_DIR, 'codex-trace');
+const TOOL_ID_RE = /^[\w-]{8,80}$/;
+const CODEX_LEAD_PROMPT = '\n\n# 子代理：Codex（重要）\n'
+  + '用户在网页里选择了让 Codex（OpenAI GPT 模型）当你的子代理，目的是把具体的干活工作交给它、节省你的额度。Claude 自带的 Task / Agent 子代理已关闭。\n'
+  + '你的角色是主管：理解需求、拆分任务、给 Codex 写清楚任务书、审核它的结果、和用户沟通。具体的干活默认交给 mcp__codex__codex_task：\n'
+  + '- 需要读三个以上文件、在代码库里搜索或摸清结构 → 委派（mode=read）\n'
+  + '- 写新代码、改多处代码、实现功能、重构 → 委派（mode=write）\n'
+  + '- 跑测试、复现和排查 bug、装依赖、构建 → 委派\n'
+  + '- 重要改动完成后的独立复查 → 再委派一次 mode=read 的检查\n'
+  + '只有这些自己做：不用查代码就能回答的问题、一两行的小改动、核实 Codex 结论时读一两个文件抽查。拿不准时委派。\n'
+  + '大任务拆成几个互不重叠的子任务（不要让两个子任务改同一个文件），能并行的在同一条回复里一起发出。\n'
+  + 'Codex 看不到这段对话，也不能问你问题：task 写目标，context 写用户要什么、已知信息、约定和你已经做过的事，files 列出相关文件，done_criteria 写怎么算完成。\n'
+  + 'Codex 返回后，关键结论要抽查核实再告诉用户；需要补充或返工时用 mcp__codex__codex_continue 接着同一个 thread_id。'
+  + '如果用户明确说「你自己做」「别用 Codex」，就照用户说的。';
 // 从 /api/chat 的请求里取子代理设置；没选 Codex 模型返回 null（= Claude 自己负责）
 function subagentFrom(body) {
   if (typeof body.codexModel !== 'string' || !/^[\w.\-]+$/.test(body.codexModel)) return null;
@@ -632,6 +647,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (PROMPT_TOOL_FLAG) cliArgs.push('--permission-prompt-tool', 'stdio');
   prepareAccount(account);
   cliArgs.push(...accountArgs(account));
+  const runId = crypto.randomUUID(), eventKey = crypto.randomBytes(12).toString('hex');
   const sysFiles = [];
   const tmpFile = (text) => {
     const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
@@ -640,7 +656,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   // Codex 子代理：挂 MCP、关掉 Claude 自带子代理；自动放行 codex 工具（default / plan 模式下仍会弹框问）
   let webPrompt = WEB_PROMPT;
   if (subagent && subagent.model && CODEX_BIN) {
-    cliArgs.push('--mcp-config', codexMcpConfig(subagent, permissionMode, tmpFile), '--disallowedTools', 'Task,Agent');
+    cliArgs.push('--mcp-config', codexMcpConfig(subagent, permissionMode, tmpFile, runId, eventKey), '--disallowedTools', 'Task,Agent');
     if (['acceptEdits', 'auto', 'bypassPermissions'].includes(permissionMode)) cliArgs.push('--allowedTools', 'mcp__codex__codex_task,mcp__codex__codex_continue');
     webPrompt += CODEX_LEAD_PROMPT;
   }
@@ -661,7 +677,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
 
   const child = spawnClaude(cliArgs, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   // asks：等网页回答的请求 request_id -> request
-  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId, asks: new Map(), account: account.id };
+  const r = { id: runId, eventKey, cwd, child, lines: [], done: false, listeners: new Set(), sessionId, asks: new Map(), account: account.id };
   runs.set(cwd, r);
 
   const push = (line) => {
@@ -1154,6 +1170,28 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, { ok: true });
         }
         return json(res, 405, { error: 'method' });
+      }
+      case '/api/codex-event': {
+        // codex-mcp.js 发来的 Codex 过程：推进输出流（网页实时显示），并按 tool_use_id 记到文件
+        if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+        const r = findRun(q('run'));
+        if (!r || q('k') !== r.eventKey) return json(res, 403, { error: 'bad key' });
+        const b = await readBody(req);
+        const ev = { type: 'web_codex', tool_use_id: TOOL_ID_RE.test(b.toolUseId || '') ? b.toolUseId : '', kind: String(b.kind || ''), text: String(b.text || '').slice(0, 20000) };
+        if (b.code !== undefined) ev.code = b.code;
+        if (b.output) ev.output = String(b.output).slice(0, 4000);
+        if (b.id) ev.id = String(b.id).slice(0, 80);
+        if (!r.done) r.push(JSON.stringify(ev));
+        if (ev.tool_use_id) {
+          try { fs.mkdirSync(CODEX_TRACE_DIR, { recursive: true }); fs.appendFileSync(path.join(CODEX_TRACE_DIR, ev.tool_use_id + '.jsonl'), JSON.stringify({ ...ev, at: Date.now() }) + '\n'); } catch {}
+        }
+        return json(res, 200, { ok: true });
+      }
+      case '/api/codex-trace': {
+        const id = q('id');
+        if (!TOOL_ID_RE.test(id)) return json(res, 400, { error: 'bad id' });
+        let lines = []; try { lines = fs.readFileSync(path.join(CODEX_TRACE_DIR, id + '.jsonl'), 'utf8').split('\n').filter(Boolean); } catch {}
+        return json(res, 200, lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
       }
       case '/api/codex': {
         // GET：是否装了 Codex、模型列表、账号和登录状态；POST {name}：新建账号；DELETE ?id=：移除（只删本机，不登出）；

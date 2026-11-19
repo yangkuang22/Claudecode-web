@@ -411,6 +411,7 @@ textarea {
   <div class="toolbar">
     <button class="pill" id="egressPill" hidden>出口 <b></b></button>
     <button class="pill" id="cmdPill"><b>/</b> 指令</button>
+    <button class="pill" id="accountPill">账号 <b></b></button>
     <button class="pill" id="modelPill">模型 <b></b></button>
     <button class="pill" id="effortPill">effort <b></b></button>
     <button class="pill" id="thinkPill">思考 <b></b></button>
@@ -988,7 +989,7 @@ async function send() {
     res = await fetch('/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: S.ctrl.signal,
       body: JSON.stringify({
-        cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm, thinking: prefs.thinking,
+        cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm, thinking: prefs.thinking, account: prefs.account,
         preset: prefs.preset,
         attachments: atts.map((a) => ({ path: a.path, name: a.name })), rewindTo,
       }),
@@ -1493,6 +1494,81 @@ refreshEgress();
 setInterval(() => { if (!document.hidden) refreshEgress(); }, 20000);
 addEventListener('visibilitychange', () => { if (!document.hidden) refreshEgress(); });
 
+// ================= 多账号 =================
+// 每个账号一个 Claude Code 配置目录，各自登录一次；切换只是换目录，不登出。登录在弹出的终端窗口里 /login
+let ACCOUNTS = [];
+async function loadAccounts(force) {
+  try { ACCOUNTS = await getJSON('/api/accounts' + (force ? '?force=1' : '')); } catch { return; }
+  if (!ACCOUNTS.some((a) => a.id === prefs.account)) { prefs.account = 'default'; store.set('account', 'default'); }
+  renderPills();
+}
+const PLAN_CN = { pro: 'Pro', max: 'Max', team: 'Team', enterprise: 'Enterprise' };
+function acctDesc(a) {
+  if (!a.loggedIn) return a.error ? '读取状态失败：' + a.error : '未登录 · 点下方「登录」';
+  const parts = [a.email || '已登录'];
+  if (a.plan) parts.push(PLAN_CN[a.plan] || a.plan);
+  if (a.expiresAt) parts.push('登录有效到 ' + fmtTime(Date.parse(a.expiresAt)));
+  return parts.join(' · ');
+}
+async function openAccounts() {
+  $('pickTitle').textContent = '账号';
+  $('pickBody').innerHTML = '<div class="usage"><span class="spin"></span> 正在读取登录状态…</div>';
+  $('pickModal').classList.add('show');
+  await loadAccounts(true);
+  const opts = [['#', '切换账号（不会登出任何账号）']];
+  for (const a of ACCOUNTS) opts.push([a.id, (a.loggedIn ? '' : '⚠ ') + a.name, acctDesc(a)]);
+  opts.push(['#', '管理'], ['__add', '＋ 添加账号', '新建一个账号槽位，然后在弹出的窗口里登录']);
+  const cur = ACCOUNTS.find((a) => a.id === prefs.account);
+  if (cur) {
+    opts.push(['__login', cur.loggedIn ? `重新登录「${cur.name}」` : `登录「${cur.name}」`, '打开终端窗口，在里面输入 /login（用这个账号的独立配置目录）']);
+    if (!cur.isDefault) {
+      opts.push(['__rename', `重命名「${cur.name}」`, '只改网页里显示的名字']);
+      opts.push(['__del', `🗑 移除「${cur.name}」`, '只删除本机保存的登录信息，不会在服务器上登出']);
+    }
+  }
+  if (S.running) opts.splice(1, 0, ['#', '⚠ 正在回复中，切换账号从下一条消息开始生效']);
+  pick('账号', opts, prefs.account, async (v) => {
+    if (v === '__add') return addAccount();
+    if (v === '__login') return loginAccount(cur);
+    if (v === '__rename') {
+      const name = prompt('账号名称：', cur.name);
+      if (!name || !name.trim()) return;
+      try { await getJSON('/api/accounts', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: cur.id, name }) }); loadAccounts(); } catch (e) { toast(e.message); }
+      return;
+    }
+    if (v === '__del') {
+      if (!confirm(`移除账号「${cur.name}」？\n只删除本机保存的登录信息（不登出，服务器上的登录不受影响）。以后想再用要重新登录。`)) return;
+      try { await getJSON('/api/accounts?id=' + encodeURIComponent(cur.id), { method: 'DELETE' }); setPref('account', 'default'); toast('已移除'); loadAccounts(); refreshUsage(true); } catch (e) { toast(e.message); }
+      return;
+    }
+    const a = ACCOUNTS.find((x) => x.id === v); if (!a) return;
+    setPref('account', v);
+    usageData = null; refreshUsage();
+    toast(a.loggedIn ? `已切换到「${a.name}」（${a.email || '已登录'}）` : `「${a.name}」还没登录，先在账号里点「登录」`);
+  });
+}
+async function addAccount() {
+  const name = prompt('给新账号起个名字（比如「号2」或邮箱前缀，只在网页里显示）：');
+  if (!name || !name.trim()) return;
+  try {
+    const r = await getJSON('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, openLogin: true }) });
+    await loadAccounts();
+    showLoginHint(r);
+  } catch (e) { toast(e.message); }
+}
+async function loginAccount(a) {
+  try { showLoginHint(await getJSON('/api/accounts/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: a.id }) })); }
+  catch (e) { toast(e.message); }
+}
+function showLoginHint(r) {
+  const msg = r.opened
+    ? '已在电脑上打开登录窗口：在窗口里的 Claude Code 输入 /login 登录，完成后关掉窗口，再打开「账号」看状态。'
+    : '这个系统不能自动弹窗，请在终端里运行下面的命令，然后输入 /login：\n' + r.loginCommand;
+  alert(msg);
+}
+$('accountPill').onclick = openAccounts;
+loadAccounts();
+
 // ================= 模型 / effort / 权限 / 用量 =================
 // 模型列表来自 Claude Code 2.1.294 内置的模型表；老模型账号不一定能用，用不了会在回复里报错
 const M = (id, name, note) => [id, name, id + (note ? ' · ' + note : '')];
@@ -1536,12 +1612,15 @@ const THINKS = [
   ['highlights', '只看标题', '每段思考只显示一个简短标题'],
   ['omitted', '不显示', '不返回思考内容（Claude Code 默认），只留一个「思考过程」占位'],
 ];
-const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), preset: store.get('preset', '') };
+const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), account: store.get('account', 'default'), preset: store.get('preset', '') };
 const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
   $('effortPill').querySelector('b').textContent = prefs.effort || '默认';
   $('thinkPill').querySelector('b').textContent = labelOf(THINKS, prefs.thinking);
+  const acct = ACCOUNTS.find((a) => a.id === prefs.account);
+  $('accountPill').querySelector('b').textContent = acct ? acct.name : prefs.account === 'default' ? '默认' : '?';
+  $('accountPill').classList.toggle('warn', !!acct && !acct.loggedIn);
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
   $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
@@ -1555,7 +1634,7 @@ function setPref(k, v) {
 getJSON('/api/prefs').then((p) => {
   // 服务端还没有记录：把这个浏览器里原有的选择存上去
   if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
-  for (const k of ['model', 'effort', 'perm', 'thinking']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  for (const k of ['model', 'effort', 'perm', 'thinking', 'account']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
   renderPills();
 }).catch(() => {});
 
@@ -1722,7 +1801,7 @@ function fmtResetAt(t) {
 const LABELS = { 'current session': '当前 5 小时窗口', 'current week (all models)': '本周（所有模型）' };
 let usageData = null;
 async function refreshUsage(force) {
-  try { usageData = await getJSON('/api/usage' + (force ? '?force=1' : '')); } catch { return; }
+  try { usageData = await getJSON('/api/usage?' + new URLSearchParams({ account: prefs.account || 'default', ...(force ? { force: '1' } : {}) })); } catch { return; }
   const top = usageData.windows.reduce((a, w) => (w.pct > (a ? a.pct : -1) ? w : a), null);
   const pill = $('usagePill');
   pill.querySelector('b').textContent = top ? Math.round(top.pct) + '%' : '—';

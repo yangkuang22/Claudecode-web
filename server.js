@@ -56,6 +56,104 @@ function spawnClaude(cliArgs, opts) {
   return spawn(CLAUDE_BIN, cliArgs, { ...opts, windowsHide: true });
 }
 
+// ============ 多账号：每个账号一个配置目录，切换只换目录，从不登出 ============
+// Claude Code 的登录凭据存在配置目录（CLAUDE_CONFIG_DIR，默认 ~/.claude）的 .credentials.json 里。
+// 默认账号 = ~/.claude（不设 CLAUDE_CONFIG_DIR）；其它账号各有一个目录 ~/.claude-web/accounts/<id>/，各自登录一次，之后一直保持。
+// 会话记录要共用（网页读的是 ~/.claude/projects，切账号后还能接着聊）：账号目录里的 projects 等用目录链接
+// （Windows 是 junction，不需要管理员）指向 ~/.claude 里的同名目录；settings.json 用 --settings 传进去。
+// 删除账号只删本机目录，不调用登出。
+const CLAUDE_HOME = path.join(os.homedir(), '.claude');
+const ACCOUNTS_DIR = path.join(DATA_DIR, 'accounts');
+const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
+const SHARED_DIRS = ['projects', 'skills', 'agents', 'commands', 'plugins'];
+const ACC_ID_RE = /^[a-z0-9]{8}$/;
+const DEFAULT_ACCOUNT = { id: 'default', name: '默认', dir: CLAUDE_HOME, isDefault: true };
+function loadAccounts() {
+  try { const a = JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8')); return Array.isArray(a) ? a.filter((x) => x && ACC_ID_RE.test(x.id)) : []; } catch { return []; }
+}
+const saveAccounts = (list) => fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(list.map(({ id, name, at }) => ({ id, name, at })), null, 2) + '\n');
+function getAccount(id) {
+  if (!id || id === 'default') return DEFAULT_ACCOUNT;
+  const a = loadAccounts().find((x) => x.id === id);
+  return a ? { ...a, dir: path.join(ACCOUNTS_DIR, a.id), isDefault: false } : null;
+}
+// 账号目录里补上指向 ~/.claude 的目录链接（每次用之前都调一下：~/.claude 里后来才出现的目录也能链上）
+function prepareAccount(acct) {
+  if (!acct || acct.isDefault) return;
+  fs.mkdirSync(acct.dir, { recursive: true });
+  for (const n of SHARED_DIRS) {
+    const target = path.join(CLAUDE_HOME, n), link = path.join(acct.dir, n);
+    try { fs.lstatSync(link); continue; } catch {} // 已经有了（链接或账号自己的目录）就不动
+    if (n === 'projects') fs.mkdirSync(target, { recursive: true });
+    else if (!fs.existsSync(target)) continue;
+    try { fs.symlinkSync(target, link, IS_WIN ? 'junction' : 'dir'); } catch (e) { console.error(`  [账号] 链接 ${link} 失败：${e.message}`); }
+  }
+}
+// 删除账号目录：先拆掉目录链接（只删链接本身），确认 ~/.claude 里的原目录还在，再删账号自己的文件
+function removeAccountDir(acct) {
+  const dir = path.resolve(acct.dir);
+  if (acct.isDefault || path.dirname(dir) !== path.resolve(ACCOUNTS_DIR)) throw new Error('不能删除这个目录');
+  let names = []; try { names = fs.readdirSync(dir); } catch { return; }
+  for (const n of names) {
+    const p = path.join(dir, n);
+    if (fs.lstatSync(p).isSymbolicLink()) { try { fs.unlinkSync(p); } catch { fs.rmdirSync(p); } }
+  }
+  if (!fs.existsSync(path.join(CLAUDE_HOME, 'projects')) && names.includes('projects')) throw new Error('安全检查没通过：~/.claude/projects 不见了，停止删除');
+  for (const n of fs.readdirSync(dir)) if (fs.lstatSync(path.join(dir, n)).isSymbolicLink()) throw new Error('还有没拆掉的链接：' + n);
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+// 非默认账号的额外参数：共用 ~/.claude/settings.json
+const accountArgs = (acct) => (acct && !acct.isDefault && fs.existsSync(path.join(CLAUDE_HOME, 'settings.json')) ? ['--settings', path.join(CLAUDE_HOME, 'settings.json')] : []);
+const accountLoggedIn = (acct) => acct.isDefault || fs.existsSync(path.join(acct.dir, '.credentials.json'));
+// 登录状态（邮箱、套餐、到期时间），用 `claude auth status --json`；缓存 1 分钟
+const acctStatusCache = new Map();
+function accountStatus(acct, force) {
+  const c = acctStatusCache.get(acct.id);
+  if (!force && c && Date.now() - c.at < 60e3) return Promise.resolve(c.st);
+  prepareAccount(acct);
+  return new Promise((resolve) => {
+    let out = '';
+    const child = spawnClaude(['auth', 'status', '--json'], { cwd: DATA_DIR, env: claudeEnv(acct), stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (d) => { out += d; });
+    const timer = setTimeout(() => killProc(child, true), 20e3);
+    const done = () => {
+      clearTimeout(timer);
+      let st = { loggedIn: false };
+      try {
+        const j = JSON.parse(out.slice(out.indexOf('{')));
+        st = { loggedIn: !!j.loggedIn, email: j.email || '', plan: j.subscriptionType || j.planTier || '', expiresAt: j.loginExpiresAt || null, method: j.authMethod || '' };
+      } catch { st.error = out.trim().slice(0, 300) || '读取登录状态失败'; }
+      acctStatusCache.set(acct.id, { at: Date.now(), st });
+      resolve(st);
+    };
+    child.on('close', done);
+    child.on('error', done);
+  });
+}
+// 打开一个设好账号目录的终端窗口，在里面运行 claude，由用户自己 /login（和平时在终端里登录一样）
+function loginCommand(acct) {
+  const q = (s) => (IS_WIN ? `"${s}"` : `'${s}'`);
+  return IS_WIN ? `set CLAUDE_CONFIG_DIR=${acct.dir}&& claude` : `CLAUDE_CONFIG_DIR=${q(acct.dir)} claude`;
+}
+function openLoginWindow(acct) {
+  if (!IS_WIN) return false;
+  prepareAccount(acct);
+  const f = path.join(acct.dir === CLAUDE_HOME ? DATA_DIR : acct.dir, 'login.cmd');
+  const lines = [
+    '@echo off', 'chcp 65001 >nul', `title Claude 登录 - ${acct.name.replace(/[&|<>^%"]/g, '')}`,
+    'echo.', `echo   这是账号「${acct.name.replace(/[&|<>^%"]/g, '')}」的登录窗口（配置目录 ${acct.dir}）`,
+    'echo   在下面的 Claude Code 里输入 /login 登录。登录好以后关掉这个窗口，回网页刷新账号列表。',
+    'echo   注意：登录会用默认浏览器打开 claude.ai，浏览器走哪个节点，登录时 Anthropic 看到的就是哪个 IP。',
+    'echo.', `call "${CLAUDE_BIN}"`,
+  ];
+  fs.writeFileSync(f, lines.join('\r\n') + '\r\n');
+  const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"start "Claude 登录" "${f}""`],
+    { env: claudeEnv(acct), detached: true, stdio: 'ignore', windowsVerbatimArguments: true });
+  child.on('error', () => {}); child.unref();
+  acctStatusCache.delete(acct.id);
+  return true;
+}
+
 // ============ 出口锁：claude 只走指定代理，出口 IP 不对就拦 ============
 // 配置在 ~/.claude-web/egress.json（bin/egress-init.js 生成），没有这个文件就不启用，行为和以前一样。
 // 三层：① 独立 xray 只有节点一个出站（节点挂了就连不上，不会走本机）② 防火墙只许 claude.exe 连本机（bin/egress-firewall.ps1）
@@ -73,9 +171,10 @@ try {
   EGRESS = null;
 }
 const egress = { state: EGRESS ? 'checking' : 'off', ip: '', loc: '', at: 0, error: '' };
-// 启动 claude 用的环境变量：开了出口锁就强制走代理（清掉原有的各种大小写的代理变量再设）
-function claudeEnv(extra) {
-  const env = { ...process.env, ...(extra || {}) };
+// 启动 claude 用的环境变量：指定账号的配置目录；开了出口锁就强制走代理（清掉原有的各种大小写的代理变量再设）
+function claudeEnv(acct) {
+  const env = { ...process.env };
+  if (acct && !acct.isDefault) env.CLAUDE_CONFIG_DIR = acct.dir;
   if (!EGRESS) return env;
   for (const k of Object.keys(env)) if (/^(https?|all|no)_proxy$/i.test(k)) delete env[k];
   env.HTTPS_PROXY = env.HTTP_PROXY = env.https_proxy = env.http_proxy = EGRESS.proxy;
@@ -417,7 +516,7 @@ function seedWritingSession(cwd, turns) {
 }
 
 const THINKING_DISPLAYS = ['summarized', 'highlights', 'omitted'];
-function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, thinking, assembled }) {
+function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, thinking, assembled, account }) {
   const isNew = !sessionId;
   // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
   if (assembled && assembled.seedTurns && assembled.seedTurns.length && isNew) {
@@ -434,6 +533,8 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   if (THINKING_FLAG && thinking) cliArgs.push('--thinking-display', thinking);
   // 需要人回答的请求（提问、执行命令的审批等）发到 stdout 等网页回答；不加的话 -p 模式下一律自动拒绝
   if (PROMPT_TOOL_FLAG) cliArgs.push('--permission-prompt-tool', 'stdio');
+  prepareAccount(account);
+  cliArgs.push(...accountArgs(account));
   const sysFiles = [];
   const tmpFile = (text) => {
     const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
@@ -450,13 +551,13 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   } else {
     cliArgs.push('--append-system-prompt', WEB_PROMPT);
   }
-  const env = claudeEnv();
+  const env = claudeEnv(account);
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
 
   const child = spawnClaude(cliArgs, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   // asks：等网页回答的请求 request_id -> request
-  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId, asks: new Map() };
+  const r = { id: crypto.randomUUID(), cwd, child, lines: [], done: false, listeners: new Set(), sessionId, asks: new Map(), account: account.id };
   runs.set(cwd, r);
 
   const push = (line) => {
@@ -486,7 +587,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
           }
         }
         if (ev.type === 'control_cancel_request' && ev.request_id) r.asks.delete(ev.request_id);
-        if (ev.type === 'rate_limit_event') saveRateLimit(ev.rate_limit_info);
+        if (ev.type === 'rate_limit_event') saveRateLimit(ev.rate_limit_info, account);
         // 一轮结束：关掉 stdin，claude 才会退出（stdin 开着时它会继续等下一条消息）
         if (ev.type === 'result' && !ev.parent_tool_use_id) { r.asks.clear(); try { child.stdin.end(); } catch {} }
       } catch { continue; }
@@ -564,17 +665,18 @@ function streamRun(r, from, req, res) {
 // 新版 claude 的 `/usage` 在 -p 模式下不再输出「xx% used」额度行，只剩用量分析。
 // 额度改从每次对话输出的 rate_limit_event 里取（unifiedWindows：five_hour / seven_day ...，utilization 0~1，resetsAt 秒），
 // 存到 ratelimit.json；旧版 claude 仍能从 /usage 解析出来时以 /usage 为准。
-const RATELIMIT_FILE = path.join(DATA_DIR, 'ratelimit.json');
-function saveRateLimit(info) {
+// 每个账号一份：默认账号 ratelimit.json，其它 ratelimit-<id>.json
+const rateLimitFile = (acct) => path.join(DATA_DIR, acct && !acct.isDefault ? `ratelimit-${acct.id}.json` : 'ratelimit.json');
+function saveRateLimit(info, acct) {
   if (!info || typeof info !== 'object') return;
   const w = info.unifiedWindows && typeof info.unifiedWindows === 'object' ? info.unifiedWindows : null;
   if (!w || !Object.keys(w).length) return;
-  try { fs.writeFileSync(RATELIMIT_FILE, JSON.stringify({ at: Date.now(), windows: w })); } catch {}
-  usageCache = null;
+  try { fs.writeFileSync(rateLimitFile(acct), JSON.stringify({ at: Date.now(), windows: w })); } catch {}
+  usageCache.delete((acct || DEFAULT_ACCOUNT).id);
 }
 const RL_LABELS = { five_hour: '当前 5 小时窗口', seven_day: '本周（所有模型）', seven_day_opus: '本周（Opus）', seven_day_sonnet: '本周（Sonnet）' };
-function rateLimitWindows() {
-  let d; try { d = JSON.parse(fs.readFileSync(RATELIMIT_FILE, 'utf8')); } catch { return null; }
+function rateLimitWindows(acct) {
+  let d; try { d = JSON.parse(fs.readFileSync(rateLimitFile(acct), 'utf8')); } catch { return null; }
   const now = Date.now(), windows = [];
   for (const [k, v] of Object.entries(d.windows || {})) {
     if (!v || typeof v.utilization !== 'number') continue;
@@ -585,12 +687,16 @@ function rateLimitWindows() {
   }
   return windows.length ? { at: d.at, windows } : null;
 }
-let usageCache = null;
-function getUsage(force) {
-  if (!force && usageCache && Date.now() - usageCache.at < 60e3) return Promise.resolve(usageCache);
+const usageCache = new Map(); // 账号 id -> 结果
+function getUsage(force, acct) {
+  acct = acct || DEFAULT_ACCOUNT;
+  const c = usageCache.get(acct.id);
+  if (!force && c && Date.now() - c.at < 60e3) return Promise.resolve(c);
+  if (!accountLoggedIn(acct)) return Promise.resolve({ at: Date.now(), windows: [], notes: [`账号「${acct.name}」还没登录`] });
   if (EGRESS && egress.state !== 'ok') return Promise.resolve({ at: Date.now(), windows: [], notes: ['出口检查没通过，暂不查询用量'] });
+  prepareAccount(acct);
   return new Promise((resolve) => {
-    const child = spawnClaude(['-p', '/usage', '--no-session-persistence'], { cwd: DATA_DIR, env: claudeEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawnClaude(['-p', '/usage', '--no-session-persistence', ...accountArgs(acct)], { cwd: DATA_DIR, env: claudeEnv(acct), stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
@@ -607,12 +713,13 @@ function getUsage(force) {
       }
       let dataAt = 0;
       if (!windows.length) {
-        const rl = rateLimitWindows();
+        const rl = rateLimitWindows(acct);
         if (rl) { windows.push(...rl.windows); dataAt = rl.at; notes.length = 0; }
         else notes.splice(0, notes.length, '还没有额度数据：发一条消息后就会显示（新版 Claude Code 只在对话时返回额度；用 API Key 时没有额度信息）');
       }
-      usageCache = { at: Date.now(), dataAt, windows, notes };
-      resolve(usageCache);
+      const result = { at: Date.now(), dataAt, windows, notes };
+      usageCache.set(acct.id, result);
+      resolve(result);
     });
   });
 }
@@ -906,7 +1013,52 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ...egress, expectIp: EGRESS ? EGRESS.expectIp : [], proxy: EGRESS ? EGRESS.proxy : '' });
       }
       case '/api/usage':
-        return json(res, 200, await getUsage(q('force') === '1'));
+        return json(res, 200, await getUsage(q('force') === '1', getAccount(q('account')) || DEFAULT_ACCOUNT));
+      case '/api/accounts': {
+        // GET：账号列表和登录状态；POST {name}：新建账号；PUT {id,name}：重命名；DELETE ?id=：删除（只删本机，不登出）
+        if (req.method === 'GET') {
+          const list = [DEFAULT_ACCOUNT, ...loadAccounts().map((a) => getAccount(a.id))];
+          const force = q('force') === '1';
+          const sts = await Promise.all(list.map((a) => accountStatus(a, force)));
+          return json(res, 200, list.map((a, i) => ({ id: a.id, name: a.name, isDefault: a.isDefault, dir: a.dir, ...sts[i], loginCommand: loginCommand(a) })));
+        }
+        const body = req.method === 'DELETE' ? {} : await readBody(req);
+        const name = String(body.name || '').trim().replace(/[\r\n]/g, ' ').slice(0, 40);
+        if (req.method === 'POST') {
+          if (!name) return json(res, 400, { error: '请填写账号名称' });
+          const list = loadAccounts();
+          const acct = { id: crypto.randomBytes(4).toString('hex'), name, at: Date.now() };
+          list.push(acct); saveAccounts(list);
+          const a = getAccount(acct.id); prepareAccount(a);
+          return json(res, 200, { id: a.id, name: a.name, loginCommand: loginCommand(a), opened: body.openLogin ? openLoginWindow(a) : false });
+        }
+        if (req.method === 'PUT') {
+          const list = loadAccounts(), a = list.find((x) => x.id === body.id);
+          if (!a) return json(res, 404, { error: '没有这个账号' });
+          if (!name) return json(res, 400, { error: '请填写账号名称' });
+          a.name = name; saveAccounts(list);
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === 'DELETE') {
+          const a = getAccount(q('id'));
+          if (!a || a.isDefault) return json(res, 400, { error: '默认账号不能删除' });
+          if ([...runs.values()].some((r) => !r.done && r.account === a.id)) return json(res, 409, { error: '这个账号还有任务在跑，先停掉' });
+          removeAccountDir(a);
+          saveAccounts(loadAccounts().filter((x) => x.id !== a.id));
+          acctStatusCache.delete(a.id); usageCache.delete(a.id);
+          try { fs.rmSync(rateLimitFile(a), { force: true }); } catch {}
+          return json(res, 200, { ok: true });
+        }
+        return json(res, 405, { error: 'method' });
+      }
+      case '/api/accounts/login': {
+        // 打开这个账号的登录终端窗口（仅 Windows；其它系统返回命令让用户自己在终端里运行）
+        if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
+        const body = await readBody(req);
+        const a = getAccount(body.id);
+        if (!a) return json(res, 404, { error: '没有这个账号' });
+        return json(res, 200, { opened: openLoginWindow(a), loginCommand: loginCommand(a) });
+      }
       case '/api/projects':
         return json(res, 200, listProjects());
       case '/api/presets':
@@ -1014,6 +1166,7 @@ const server = http.createServer(async (req, res) => {
           if (['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort)) cur.effort = body.effort;
           if (typeof body.perm === 'string' && /^[a-zA-Z]+$/.test(body.perm)) cur.perm = body.perm;
           if (THINKING_DISPLAYS.includes(body.thinking)) cur.thinking = body.thinking;
+          if (typeof body.account === 'string' && getAccount(body.account)) cur.account = body.account;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
         }
         return json(res, 200, cur);
@@ -1049,6 +1202,9 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const cwd = checkDir(body.cwd);
         if (activeRun(cwd)) return json(res, 409, { error: '这个项目上一条消息还在处理中' });
+        const account = getAccount(body.account);
+        if (!account) return json(res, 400, { error: '选中的账号已经不存在了，请重新选择账号' });
+        if (!accountLoggedIn(account)) return json(res, 400, { error: `账号「${account.name}」还没登录：在「账号」里点「登录」，在弹出的窗口里 /login` });
         const egressErr = await egressReady();
         if (egressErr) return json(res, 503, { error: '出口检查没通过，这条消息没有发出：' + egressErr, egress });
         const attachments = (Array.isArray(body.attachments) ? body.attachments : [])
@@ -1068,6 +1224,7 @@ const server = http.createServer(async (req, res) => {
           effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(body.effort) ? body.effort : null,
           permissionMode: /^[a-zA-Z]+$/.test(body.permissionMode || '') ? body.permissionMode : null,
           thinking: THINKING_DISPLAYS.includes(body.thinking) ? body.thinking : null,
+          account,
         });
         return streamRun(r, 0, req, res);
       }

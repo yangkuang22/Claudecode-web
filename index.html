@@ -246,8 +246,16 @@ textarea {
 .drop-hint { position: fixed; inset: 0; z-index: 35; border: 3px dashed var(--accent); background: rgba(217,119,87,.08); display: none; place-items: center; font-size: 18px; pointer-events: none; }
 .drop-hint.show { display: grid; }
 
-.toolbar { max-width: 820px; margin: 0 auto 6px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+.toolbar { max-width: 820px; margin: 0 auto 6px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; }
 .toolbar::-webkit-scrollbar { display: none; }
+.toolbar.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
+.toolbar.fade-l { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px); mask-image: linear-gradient(to right, transparent, #000 36px); }
+.toolbar.fade-l.fade-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); mask-image: linear-gradient(to right, transparent, #000 36px, #000 calc(100% - 36px), transparent); }
+@media (pointer: fine) {
+  .toolbar { scrollbar-width: thin; scrollbar-color: var(--border) transparent; padding-bottom: 3px; cursor: grab; }
+  .toolbar::-webkit-scrollbar { display: block; height: 4px; }
+  .toolbar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+}
 .pill {
   flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 999px;
   border: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 12.5px; line-height: 1.5;
@@ -412,6 +420,7 @@ textarea {
     <button class="pill" id="egressPill" hidden>出口 <b></b></button>
     <button class="pill" id="cmdPill"><b>/</b> 指令</button>
     <button class="pill" id="accountPill">账号 <b></b></button>
+    <button class="pill" id="subPill">子代理 <b></b></button>
     <button class="pill" id="modelPill">模型 <b></b></button>
     <button class="pill" id="effortPill">effort <b></b></button>
     <button class="pill" id="thinkPill">思考 <b></b></button>
@@ -698,9 +707,10 @@ function toolInputHtml(name, inp) {
   if (name === 'Write') return `<pre class="tin">${esc(clip(String(inp.content || ''), 6000))}</pre>`;
   return `<pre class="tin">${esc(clip(JSON.stringify(inp, null, 2), 6000))}</pre>`;
 }
+const TOOL_LABEL = { mcp__codex__codex_task: '⚙ Codex 子代理', mcp__codex__codex_continue: '⚙ Codex 追问' };
 function addTool(id, name, inp) {
   const d = el('details', 'tool');
-  d.innerHTML = `<summary><span class="tname">${esc(name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary><div class="tbody"></div>`;
+  d.innerHTML = `<summary><span class="tname">${esc(TOOL_LABEL[name] || name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary><div class="tbody"></div>`;
   d._name = name; d._json = '';
   if (inp) setToolInput(d, inp);
   if (name === 'TodoWrite') d.open = true;
@@ -990,6 +1000,7 @@ async function send() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: S.ctrl.signal,
       body: JSON.stringify({
         cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm, thinking: prefs.thinking, account: prefs.account,
+        codexModel: prefs.codexModel, codexEffort: prefs.codexEffort, codexAccount: prefs.codexAccount,
         preset: prefs.preset,
         attachments: atts.map((a) => ({ path: a.path, name: a.name })), rewindTo,
       }),
@@ -1494,6 +1505,110 @@ refreshEgress();
 setInterval(() => { if (!document.hidden) refreshEgress(); }, 20000);
 addEventListener('visibilitychange', () => { if (!document.hidden) refreshEgress(); });
 
+// ================= 工具栏滚动 =================
+(() => {
+  const tb = document.querySelector('.toolbar');
+  const fade = () => {
+    tb.classList.toggle('fade-l', tb.scrollLeft > 4);
+    tb.classList.toggle('fade-r', tb.scrollLeft + tb.clientWidth < tb.scrollWidth - 4);
+  };
+  // 鼠标滚轮（上下）→ 横向滚动
+  tb.addEventListener('wheel', (e) => {
+    if (tb.scrollWidth <= tb.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+    e.preventDefault(); tb.scrollLeft += e.deltaY;
+  }, { passive: false });
+  // 鼠标按住拖动；拖动过就不触发按钮点击
+  let down = null, moved = false;
+  tb.addEventListener('mousedown', (e) => { if (e.button === 0) { down = { x: e.clientX, l: tb.scrollLeft }; moved = false; } });
+  addEventListener('mousemove', (e) => {
+    if (!down) return;
+    const dx = e.clientX - down.x;
+    if (Math.abs(dx) > 5) moved = true;
+    if (moved) tb.scrollLeft = down.l - dx;
+  });
+  addEventListener('mouseup', () => { down = null; });
+  tb.addEventListener('click', (e) => { if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; } }, true);
+  tb.addEventListener('scroll', fade, { passive: true });
+  addEventListener('resize', fade);
+  new MutationObserver(fade).observe(tb, { subtree: true, childList: true, characterData: true, attributes: true });
+  setTimeout(fade, 300);
+})();
+
+// ================= Codex 子代理 =================
+// 选了 Codex 模型：Claude 当主模型，子任务通过 codex_task 工具交给 Codex（用 ChatGPT 订阅额度）。选「Claude」= 和以前一样
+let CODEX = { available: false, models: [], efforts: [], accounts: [] };
+async function loadCodex() {
+  try { CODEX = await getJSON('/api/codex'); } catch { return; }
+  if (!CODEX.accounts.some((a) => a.id === prefs.codexAccount)) { prefs.codexAccount = 'default'; store.set('codexAccount', 'default'); }
+  renderPills();
+}
+const EFFORT_CN = { low: '低', medium: '中', high: '高', xhigh: '很高' };
+async function openSubagent() {
+  await loadCodex();
+  const opts = [['claude', 'Claude 自己', '不用 Codex：子任务也由 Claude 的子代理负责（全部消耗 Claude 额度）']];
+  if (!CODEX.available) opts.push(['#', '没有找到 Codex（codex 命令），装好并登录后刷新页面']);
+  else {
+    opts.push(['#', 'Codex 模型（Claude 当主模型，子任务交给它）']);
+    for (const m of CODEX.models) opts.push([m.slug, m.name, `${m.slug} · ${m.desc}`]);
+    opts.push(['__custom', '自定义模型…', '手动输入 Codex 模型名']);
+    const ca = CODEX.accounts.find((a) => a.id === prefs.codexAccount);
+    opts.push(['#', 'Codex 设置']);
+    opts.push(['__effort', `思考强度：${prefs.codexEffort}（${EFFORT_CN[prefs.codexEffort] || ''}）`, 'sol 系列默认只有 low，委派任务建议 high；Claude 也可以按任务单独指定']);
+    opts.push(['__account', `Codex 账号：${ca ? ca.name : '?'}`, ca ? codexAcctDesc(ca) : '']);
+  }
+  const cur = prefs.codexModel || 'claude';
+  pick('子代理', opts, CODEX.models.some((m) => m.slug === cur) || cur === 'claude' ? cur : '__custom', (v) => {
+    if (v === '__effort') return pick('Codex 思考强度', CODEX.efforts.map((e) => [e, `${e}（${EFFORT_CN[e] || e}）`, e === 'high' ? '推荐' : e === 'xhigh' ? '难题、复杂调试；更慢、更耗 Codex 额度' : e === 'low' ? '只适合简单查找' : '']),
+      prefs.codexEffort, (e) => setPref('codexEffort', e));
+    if (v === '__account') return openCodexAccounts();
+    if (v === '__custom') {
+      const n = prompt('Codex 模型名（如 gpt-6.2-sol）：', prefs.codexModel);
+      if (n && /^[\w.\-]+$/.test(n.trim())) setPref('codexModel', n.trim());
+      return;
+    }
+    setPref('codexModel', v === 'claude' ? '' : v);
+    toast(v === 'claude' ? '子代理：Claude 自己负责' : `子代理：Codex ${v}（从下一条消息开始）`);
+  });
+}
+function codexAcctDesc(a) {
+  if (!a.loggedIn) return '未登录';
+  return [a.email || '已登录', a.plan ? a.plan.toUpperCase() : '', a.method === 'apikey' ? 'API Key' : ''].filter(Boolean).join(' · ');
+}
+function openCodexAccounts() {
+  const opts = [['#', '切换 Codex 账号（不会登出任何账号）']];
+  for (const a of CODEX.accounts) opts.push([a.id, (a.loggedIn ? '' : '⚠ ') + a.name, codexAcctDesc(a)]);
+  opts.push(['#', '管理'], ['__add', '＋ 添加 Codex 账号', '新建账号槽位，并弹出登录窗口']);
+  const cur = CODEX.accounts.find((a) => a.id === prefs.codexAccount);
+  if (cur) {
+    opts.push(['__login', `${cur.loggedIn ? '重新登录' : '登录'}「${cur.name}」`, '打开登录窗口（会用浏览器打开 ChatGPT 登录页）']);
+    if (!cur.isDefault) opts.push(['__del', `🗑 移除「${cur.name}」`, '只删除本机保存的登录信息，不登出']);
+  }
+  pick('Codex 账号', opts, prefs.codexAccount, async (v) => {
+    try {
+      if (v === '__add') {
+        const name = prompt('给这个 Codex 账号起个名字：'); if (!name || !name.trim()) return;
+        const r = await getJSON('/api/codex', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, openLogin: true }) });
+        setPref('codexAccount', r.id); await loadCodex(); return codexLoginHint(r);
+      }
+      if (v === '__login') return codexLoginHint(await getJSON('/api/codex?login=' + encodeURIComponent(cur.id), { method: 'POST' }));
+      if (v === '__del') {
+        if (!confirm(`移除 Codex 账号「${cur.name}」？只删除本机保存的登录信息，不登出。`)) return;
+        await getJSON('/api/codex?id=' + encodeURIComponent(cur.id), { method: 'DELETE' });
+        setPref('codexAccount', 'default'); await loadCodex(); return toast('已移除');
+      }
+      const a = CODEX.accounts.find((x) => x.id === v); if (!a) return;
+      setPref('codexAccount', v);
+      toast(a.loggedIn ? `Codex 账号：${a.name}` : `「${a.name}」还没登录`);
+    } catch (e) { toast(e.message); }
+  });
+}
+function codexLoginHint(r) {
+  alert(r.opened ? '已在电脑上打开 Codex 登录窗口，按提示在浏览器里登录 ChatGPT，完成后关掉窗口，再打开「子代理 → Codex 账号」看状态。'
+    : '请在终端里运行：\n' + r.loginCommand);
+}
+$('subPill').onclick = openSubagent;
+loadCodex();
+
 // ================= 多账号 =================
 // 每个账号一个 Claude Code 配置目录，各自登录一次；切换只是换目录，不登出。登录在弹出的终端窗口里 /login
 let ACCOUNTS = [];
@@ -1612,7 +1727,8 @@ const THINKS = [
   ['highlights', '只看标题', '每段思考只显示一个简短标题'],
   ['omitted', '不显示', '不返回思考内容（Claude Code 默认），只留一个「思考过程」占位'],
 ];
-const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), account: store.get('account', 'default'), preset: store.get('preset', '') };
+const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), account: store.get('account', 'default'), preset: store.get('preset', ''),
+  codexModel: store.get('codexModel', ''), codexEffort: store.get('codexEffort', 'high'), codexAccount: store.get('codexAccount', 'default') };
 const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
@@ -1621,6 +1737,9 @@ function renderPills() {
   const acct = ACCOUNTS.find((a) => a.id === prefs.account);
   $('accountPill').querySelector('b').textContent = acct ? acct.name : prefs.account === 'default' ? '默认' : '?';
   $('accountPill').classList.toggle('warn', !!acct && !acct.loggedIn);
+  const cm = CODEX.models.find((m) => m.slug === prefs.codexModel);
+  $('subPill').querySelector('b').textContent = prefs.codexModel ? (cm ? cm.name : prefs.codexModel) + ' · ' + prefs.codexEffort : 'Claude';
+  $('subPill').classList.toggle('warn', !!prefs.codexModel);
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
   $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
@@ -1634,7 +1753,7 @@ function setPref(k, v) {
 getJSON('/api/prefs').then((p) => {
   // 服务端还没有记录：把这个浏览器里原有的选择存上去
   if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
-  for (const k of ['model', 'effort', 'perm', 'thinking', 'account']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  for (const k of ['model', 'effort', 'perm', 'thinking', 'account', 'codexModel', 'codexEffort', 'codexAccount']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
   renderPills();
 }).catch(() => {});
 

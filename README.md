@@ -13,6 +13,7 @@
 | 流式聊天 | 逐字输出，Markdown / 表格 / 代码块（一键复制），工具调用折叠卡片，思考过程 |
 | 思考过程显示 | 工具栏「思考」按钮切换：显示摘要 / 只看标题 / 不显示（Claude Code 默认不返回思考内容） |
 | 中途提问 | Claude 跑到一半想问你时（AskUserQuestion）弹出卡片：点选项或自己输入，提交后接着跑 |
+| Codex 子代理 | Claude 当主模型，子任务交给 Codex（GPT）做，用 ChatGPT 订阅额度；Codex 也支持多账号（见下方） |
 | 多账号 | 同时保持多个账号登录，工具栏「账号」里切换；切换不登出，会话记录各账号共用（见下方「多账号」） |
 | 出口锁 | 可选：claude 只走指定代理，出口 IP 不对就拦消息、停任务（见下方「出口锁」） |
 | 操作审批 | 非 bypass 模式下，需要确认的命令 / 改文件弹出「允许 / 拒绝」卡片，拒绝时可以附上原因 |
@@ -103,6 +104,17 @@ ln -sf ~/claude-web/index.html ~/.claude-web/index.html
 
 - 选 **bypassPermissions（全部允许）** 时，Claude 可以直接执行任何命令、修改任何文件，请确认你信任当前任务
 - 在 Linux 上以 root 运行时（比如 Termux proot），Claude Code 默认不允许 bypassPermissions，本工具会自动设置 `IS_SANDBOX=1` 解除这个限制
+
+## Codex 子代理（可选）
+
+工具栏「子代理」：选「Claude」和以前一样；选一个 Codex 模型（如 GPT-6.2-Sol）后，Claude 仍是主模型，但它自带的 Task/Agent 子代理被关掉，改用 `codex_task` 工具把子任务交给 Codex：
+
+- `bin/codex-mcp.js` 把 `codex exec` 包装成 MCP 工具，并把 Claude 写的委派内容套进固定的任务书模板（角色 / 任务 / 背景 / 约束 / 完成标准 / 汇报格式）。sol 系列默认思考强度和输出详细度都是 low，直接用效果差，这里默认用 high
+- Codex 的工作（读文件、跑命令、改代码）用的是 ChatGPT 订阅额度；Claude 只花写委派说明和读汇报的那部分
+- 权限：plan 模式下 Codex 只读；default 模式下每次委派会弹框确认；其它模式自动放行
+- 预设只影响 Claude，不影响 Codex 的任务书
+- Codex 账号：「子代理 → Codex 账号」添加，每个账号一个 `CODEX_HOME` 目录，弹窗里 `codex login` 登录一次，切换不登出
+- 开了出口锁时 Codex 也走同一个代理（继承 `HTTPS_PROXY`），但防火墙规则只管 claude.exe，不管 codex
 
 ## 多账号
 

@@ -154,6 +154,103 @@ function openLoginWindow(acct) {
   return true;
 }
 
+// ============ Codex 子代理：Claude 当主模型，子任务交给 Codex（GPT）============
+// 选了 Codex 模型时，用 --mcp-config 挂上 bin/codex-mcp.js（把 codex exec 包成 codex_task / codex_continue 两个工具），
+// 并禁用 Claude 自带的 Task/Agent 子代理。Codex 账号同样一个目录一个（CODEX_HOME），切换不登出。
+function findCodex() {
+  if (process.env.CODEX_BIN) return process.env.CODEX_BIN;
+  if (IS_WIN) {
+    const js = path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+    if (fs.existsSync(js)) return js;
+    for (const d of (process.env.PATH || '').split(path.delimiter)) {
+      for (const ext of ['.exe']) { const p = path.join(d.replace(/"/g, ''), 'codex' + ext); try { if (d && fs.statSync(p).isFile()) return p; } catch {} }
+    }
+    return null;
+  }
+  for (const d of (process.env.PATH || '').split(path.delimiter)) { const p = path.join(d, 'codex'); try { if (d && fs.statSync(p).isFile()) return p; } catch {} }
+  return null;
+}
+const CODEX_BIN = findCodex();
+const CODEX_MCP = path.join(__dirname, 'bin', 'codex-mcp.js');
+const CODEX_HOME_DEFAULT = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+const CODEX_ACC_DIR = path.join(DATA_DIR, 'codex-accounts');
+const CODEX_ACC_FILE = path.join(DATA_DIR, 'codex-accounts.json');
+const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+const CODEX_DEFAULT = { id: 'default', name: '默认', dir: CODEX_HOME_DEFAULT, isDefault: true };
+function loadCodexAccounts() {
+  try { const a = JSON.parse(fs.readFileSync(CODEX_ACC_FILE, 'utf8')); return Array.isArray(a) ? a.filter((x) => x && ACC_ID_RE.test(x.id)) : []; } catch { return []; }
+}
+const saveCodexAccounts = (list) => fs.writeFileSync(CODEX_ACC_FILE, JSON.stringify(list.map(({ id, name, at }) => ({ id, name, at })), null, 2) + '\n');
+function getCodexAccount(id) {
+  if (!id || id === 'default') return CODEX_DEFAULT;
+  const a = loadCodexAccounts().find((x) => x.id === id);
+  return a ? { ...a, dir: path.join(CODEX_ACC_DIR, a.id), isDefault: false } : null;
+}
+// 登录状态：只读本机的 auth.json（不联网）。ChatGPT 登录时 id_token 里有邮箱和套餐
+function codexAccountStatus(acct) {
+  let j; try { j = JSON.parse(fs.readFileSync(path.join(acct.dir, 'auth.json'), 'utf8')); } catch { return { loggedIn: false }; }
+  const st = { loggedIn: !!(j.tokens || j.OPENAI_API_KEY), method: j.tokens ? 'chatgpt' : j.OPENAI_API_KEY ? 'apikey' : '' };
+  try {
+    const tok = j.tokens && (typeof j.tokens.id_token === 'string' ? j.tokens.id_token : j.tokens.id_token && j.tokens.id_token.raw_jwt);
+    if (tok) {
+      const pl = JSON.parse(Buffer.from(tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+      st.email = pl.email || '';
+      const au = pl['https://api.openai.com/auth'] || {};
+      st.plan = au.chatgpt_plan_type || '';
+    }
+  } catch {}
+  return st;
+}
+function codexLoginCommand(acct) {
+  return IS_WIN ? `set CODEX_HOME=${acct.dir}&& codex login` : `CODEX_HOME='${acct.dir}' codex login`;
+}
+function openCodexLoginWindow(acct) {
+  if (!IS_WIN || !CODEX_BIN) return false;
+  fs.mkdirSync(acct.dir, { recursive: true });
+  const nm = acct.name.replace(/[&|<>^%"]/g, '');
+  const run = /\.js$/i.test(CODEX_BIN) ? `"${process.execPath}" "${CODEX_BIN}"` : `"${CODEX_BIN}"`;
+  const f = path.join(acct.isDefault ? DATA_DIR : acct.dir, 'codex-login.cmd');
+  fs.writeFileSync(f, ['@echo off', 'chcp 65001 >nul', `title Codex 登录 - ${nm}`, 'echo.',
+    `echo   这是 Codex 账号「${nm}」的登录窗口（目录 ${acct.dir}）`,
+    'echo   会用默认浏览器打开 ChatGPT 登录页；浏览器走哪个节点，OpenAI 看到的就是哪个 IP。',
+    'echo   登录完成后关掉这个窗口，回网页刷新。', 'echo.', `call ${run} login`, 'echo.', 'pause'].join('\r\n') + '\r\n');
+  const env = claudeEnv(); env.CODEX_HOME = acct.dir;
+  const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"start "Codex 登录" "${f}""`],
+    { env, detached: true, stdio: 'ignore', windowsVerbatimArguments: true });
+  child.on('error', () => {}); child.unref();
+  return true;
+}
+// 模型列表来自 Codex 自己缓存的 models_cache.json（只列 visibility=list 的）
+function codexModels() {
+  for (const home of [CODEX_HOME_DEFAULT, ...loadCodexAccounts().map((a) => path.join(CODEX_ACC_DIR, a.id))]) {
+    try {
+      const d = JSON.parse(fs.readFileSync(path.join(home, 'models_cache.json'), 'utf8'));
+      const ms = (Array.isArray(d) ? d : d.models || []).filter((m) => m && m.slug && m.visibility === 'list');
+      if (ms.length) return ms.map((m) => ({ slug: m.slug, name: m.display_name || m.slug, desc: m.description || '',
+        defaultEffort: m.default_reasoning_level || '', efforts: (m.supported_reasoning_levels || []).map((x) => x.effort).filter((x) => CODEX_EFFORTS.includes(x)) }));
+    } catch {}
+  }
+  return [];
+}
+// 给 claude 的 MCP 配置文件
+function codexMcpConfig(sub, permissionMode, tmpFile) {
+  const acct = getCodexAccount(sub.account) || CODEX_DEFAULT;
+  const env = { CODEX_BIN, CODEX_MODEL: sub.model, CODEX_EFFORT: sub.effort || 'high', CODEX_WRITE: permissionMode === 'plan' ? '0' : '1' };
+  if (!acct.isDefault) env.CODEX_HOME = acct.dir;
+  // timeout：单次调用的硬上限（毫秒）。Codex 做大任务可能要很久
+  return tmpFile(JSON.stringify({ mcpServers: { codex: { type: 'stdio', command: process.execPath, args: [CODEX_MCP], env, timeout: 3600000 } } }));
+}
+const CODEX_LEAD_PROMPT = '\n\n# 子代理\n本会话的子代理由 Codex（OpenAI GPT 模型）担任，Claude 自带的 Task / Agent 子代理已关闭。'
+  + '需要委派的工作用 mcp__codex__codex_task：大范围搜索和阅读代码、按明确要求实现改动、跑测试排查问题、独立复查。'
+  + '委派时 Codex 看不到这段对话，参数里要写清目标、背景（用户要什么、已知信息、约定）、相关文件和完成标准；只调查就用 mode=read，要改文件用 mode=write。'
+  + '简单、几步就能做完的事自己做，不要委派。Codex 返回后，关键结论自己抽查核实再告诉用户；需要补充或返工时用 mcp__codex__codex_continue 接着同一个 thread_id。'
+  + '可以一次发出多个互不相关的 codex_task 并行处理。';
+// 从 /api/chat 的请求里取子代理设置；没选 Codex 模型返回 null（= Claude 自己负责）
+function subagentFrom(body) {
+  if (typeof body.codexModel !== 'string' || !/^[\w.\-]+$/.test(body.codexModel)) return null;
+  return { model: body.codexModel, effort: CODEX_EFFORTS.includes(body.codexEffort) ? body.codexEffort : 'high', account: typeof body.codexAccount === 'string' ? body.codexAccount : 'default' };
+}
+
 // ============ 出口锁：claude 只走指定代理，出口 IP 不对就拦 ============
 // 配置在 ~/.claude-web/egress.json（bin/egress-init.js 生成），没有这个文件就不启用，行为和以前一样。
 // 三层：① 独立 xray 只有节点一个出站（节点挂了就连不上，不会走本机）② 防火墙只许 claude.exe 连本机（bin/egress-firewall.ps1）
@@ -516,7 +613,7 @@ function seedWritingSession(cwd, turns) {
 }
 
 const THINKING_DISPLAYS = ['summarized', 'highlights', 'omitted'];
-function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, thinking, assembled, account }) {
+function startRun({ cwd, message, attachments, sessionId, model, effort, permissionMode, thinking, assembled, account, subagent }) {
   const isNew = !sessionId;
   // 选了预设 + 新会话：按预设把 user/assistant 轮种进去，再 --resume
   if (assembled && assembled.seedTurns && assembled.seedTurns.length && isNew) {
@@ -540,16 +637,23 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
     const f = path.join(DATA_DIR, 'sys-' + crypto.randomBytes(4).toString('hex') + '.txt');
     fs.writeFileSync(f, text); sysFiles.push(f); return f;
   };
+  // Codex 子代理：挂 MCP、关掉 Claude 自带子代理；自动放行 codex 工具（default / plan 模式下仍会弹框问）
+  let webPrompt = WEB_PROMPT;
+  if (subagent && subagent.model && CODEX_BIN) {
+    cliArgs.push('--mcp-config', codexMcpConfig(subagent, permissionMode, tmpFile), '--disallowedTools', 'Task,Agent');
+    if (['acceptEdits', 'auto', 'bypassPermissions'].includes(permissionMode)) cliArgs.push('--allowedTools', 'mcp__codex__codex_task,mcp__codex__codex_continue');
+    webPrompt += CODEX_LEAD_PROMPT;
+  }
   if (assembled && assembled.systemField) {
     // 预设里开头连续的 system 进系统字段，--system-prompt-file 完全替换官方 system。
     // 系统字段排列顺序（claude 固定）：计费标记 → 身份行 → system-prompt-file → WebSearch 说明等 → append
     // 所以网页说明放 file、预设放 append-file，预设就排在系统字段最后。
     try {
-      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(WEB_PROMPT), '--append-system-prompt-file', tmpFile(assembled.systemField));
-      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', WEB_PROMPT); // 旧版 claude
-    } catch { cliArgs.push('--append-system-prompt', WEB_PROMPT); }
+      if (APPEND_FILE_FLAG) cliArgs.push('--system-prompt-file', tmpFile(webPrompt), '--append-system-prompt-file', tmpFile(assembled.systemField));
+      else cliArgs.push('--system-prompt-file', tmpFile(assembled.systemField), '--append-system-prompt', webPrompt); // 旧版 claude
+    } catch { cliArgs.push('--append-system-prompt', webPrompt); }
   } else {
-    cliArgs.push('--append-system-prompt', WEB_PROMPT);
+    cliArgs.push('--append-system-prompt', webPrompt);
   }
   const env = claudeEnv(account);
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
@@ -1051,6 +1155,42 @@ const server = http.createServer(async (req, res) => {
         }
         return json(res, 405, { error: 'method' });
       }
+      case '/api/codex': {
+        // GET：是否装了 Codex、模型列表、账号和登录状态；POST {name}：新建账号；DELETE ?id=：移除（只删本机，不登出）；
+        // POST /api/codex?login=<id>：打开登录窗口
+        if (req.method === 'GET') {
+          const accts = [CODEX_DEFAULT, ...loadCodexAccounts().map((a) => getCodexAccount(a.id))];
+          return json(res, 200, { available: !!CODEX_BIN, models: codexModels(), efforts: CODEX_EFFORTS,
+            accounts: accts.map((a) => ({ id: a.id, name: a.name, isDefault: a.isDefault, dir: a.dir, loginCommand: codexLoginCommand(a), ...codexAccountStatus(a) })) });
+        }
+        if (req.method === 'POST' && q('login')) {
+          const a = getCodexAccount(q('login'));
+          if (!a) return json(res, 404, { error: '没有这个账号' });
+          return json(res, 200, { opened: openCodexLoginWindow(a), loginCommand: codexLoginCommand(a) });
+        }
+        if (req.method === 'POST') {
+          const body = await readBody(req);
+          const name = String(body.name || '').trim().replace(/[\r\n]/g, ' ').slice(0, 40);
+          if (!name) return json(res, 400, { error: '请填写账号名称' });
+          const list = loadCodexAccounts();
+          const rec = { id: crypto.randomBytes(4).toString('hex'), name, at: Date.now() };
+          list.push(rec); saveCodexAccounts(list);
+          const a = getCodexAccount(rec.id);
+          fs.mkdirSync(a.dir, { recursive: true });
+          // 沿用默认账号的 config.toml（Windows 沙箱等设置），不含登录信息
+          try { fs.copyFileSync(path.join(CODEX_HOME_DEFAULT, 'config.toml'), path.join(a.dir, 'config.toml')); } catch {}
+          return json(res, 200, { id: a.id, name: a.name, opened: body.openLogin ? openCodexLoginWindow(a) : false, loginCommand: codexLoginCommand(a) });
+        }
+        if (req.method === 'DELETE') {
+          const a = getCodexAccount(q('id'));
+          if (!a || a.isDefault) return json(res, 400, { error: '默认账号不能移除' });
+          if (path.dirname(path.resolve(a.dir)) !== path.resolve(CODEX_ACC_DIR)) return json(res, 400, { error: '目录不对，停止删除' });
+          fs.rmSync(a.dir, { recursive: true, force: true });
+          saveCodexAccounts(loadCodexAccounts().filter((x) => x.id !== a.id));
+          return json(res, 200, { ok: true });
+        }
+        return json(res, 405, { error: 'method' });
+      }
       case '/api/accounts/login': {
         // 打开这个账号的登录终端窗口（仅 Windows；其它系统返回命令让用户自己在终端里运行）
         if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
@@ -1167,6 +1307,9 @@ const server = http.createServer(async (req, res) => {
           if (typeof body.perm === 'string' && /^[a-zA-Z]+$/.test(body.perm)) cur.perm = body.perm;
           if (THINKING_DISPLAYS.includes(body.thinking)) cur.thinking = body.thinking;
           if (typeof body.account === 'string' && getAccount(body.account)) cur.account = body.account;
+          if (typeof body.codexModel === 'string' && /^[\w.\-]*$/.test(body.codexModel)) cur.codexModel = body.codexModel;
+          if (CODEX_EFFORTS.includes(body.codexEffort)) cur.codexEffort = body.codexEffort;
+          if (typeof body.codexAccount === 'string' && getCodexAccount(body.codexAccount)) cur.codexAccount = body.codexAccount;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
         }
         return json(res, 200, cur);
@@ -1202,6 +1345,9 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const cwd = checkDir(body.cwd);
         if (activeRun(cwd)) return json(res, 409, { error: '这个项目上一条消息还在处理中' });
+        if (body.codexModel && !CODEX_BIN) return json(res, 400, { error: '没有找到 Codex（codex 命令），子代理请先切回「Claude」' });
+        if (body.codexModel && !getCodexAccount(body.codexAccount)) return json(res, 400, { error: '选中的 Codex 账号已经不存在了，请重新选择' });
+        if (body.codexModel && !codexAccountStatus(getCodexAccount(body.codexAccount)).loggedIn) return json(res, 400, { error: 'Codex 账号还没登录：在「子代理」里点「Codex 账号」登录' });
         const account = getAccount(body.account);
         if (!account) return json(res, 400, { error: '选中的账号已经不存在了，请重新选择账号' });
         if (!accountLoggedIn(account)) return json(res, 400, { error: `账号「${account.name}」还没登录：在「账号」里点「登录」，在弹出的窗口里 /login` });
@@ -1225,6 +1371,7 @@ const server = http.createServer(async (req, res) => {
           permissionMode: /^[a-zA-Z]+$/.test(body.permissionMode || '') ? body.permissionMode : null,
           thinking: THINKING_DISPLAYS.includes(body.thinking) ? body.thinking : null,
           account,
+          subagent: subagentFrom(body),
         });
         return streamRun(r, 0, req, res);
       }

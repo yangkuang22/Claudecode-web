@@ -23,6 +23,8 @@ const MODEL = process.env.CODEX_MODEL || 'gpt-6.2-sol';
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 const DEF_EFFORT = EFFORTS.includes(process.env.CODEX_EFFORT) ? process.env.CODEX_EFFORT : 'high';
 const WRITE_OK = process.env.CODEX_WRITE !== '0';
+// 完全权限：主模型不是「只规划」时，Codex 不开沙箱（任意目录、联网、装软件都可以），和 Claude 的权限一致
+const FULL = WRITE_OK && process.env.CODEX_FULL !== '0';
 const MAX_OUT = 24000; // 返回给 Claude 的最大字符数，太长会占 Claude 的上下文
 const SUMMARY = process.env.CODEX_REASONING_SUMMARY || 'detailed'; // 让 GPT 返回思考摘要（默认 none 不返回）
 
@@ -63,11 +65,14 @@ function brief({ task, context, files, done_criteria, mode }) {
   if (Array.isArray(files) && files.length) L.push('', 'Start from these files (read them first):', ...files.map((f) => '- ' + f));
   L.push('', '# Constraints');
   if (write) {
-    L.push('- You MAY create and edit files inside the working directory. Keep changes minimal and focused on the task.');
+    L.push(FULL
+      ? '- You have FULL access to this computer: any directory, the network, installing packages or tools. Use whatever the task needs. Keep changes focused on the task.'
+      : '- You MAY create and edit files inside the working directory. Keep changes minimal and focused on the task.');
     L.push('- Do not touch files unrelated to the task. Do not reformat or refactor code you were not asked to change.');
     L.push('- Do not run destructive commands (deleting data, git reset/checkout of others\' changes, force pushes). Do not commit or push.');
   } else {
-    L.push('- READ-ONLY: do NOT create, edit or delete any files. Investigate and report only.');
+    L.push('- READ-ONLY: do NOT create, edit or delete any files. Investigate and report only.'
+      + (FULL ? ' You may still run any read-only command and use the network (web, docs, package registries) to investigate.' : ''));
   }
   L.push('- Ground every claim in what you actually read or ran. Do not guess file contents, APIs or behaviour; open the file or run the command.');
   L.push('- If something is ambiguous, choose the most reasonable interpretation, state the assumption, and continue.');
@@ -94,9 +99,13 @@ function runCodex(rpcId, { prompt, threadId, effort, write, toolUseId }, onProgr
     const outFile = path.join(os.tmpdir(), `codex-last-${process.pid}-${Date.now()}.txt`);
     const common = ['--json', '--skip-git-repo-check', '-m', MODEL,
       '-c', `model_reasoning_effort="${effort}"`, '-c', 'model_verbosity="medium"', '-c', `model_reasoning_summary="${SUMMARY}"`, '-o', outFile];
+    // 沙箱：完全权限时不开沙箱；否则改文件用 workspace-write（允许联网），只读用 read-only。resume 不认 -s，用 -c sandbox_mode
+    const sandbox = FULL ? ['--dangerously-bypass-approvals-and-sandbox']
+      : threadId ? ['-c', `sandbox_mode="${write ? 'workspace-write' : 'read-only'}"`, '-c', 'sandbox_workspace_write.network_access=true']
+        : ['-s', write ? 'workspace-write' : 'read-only', '-c', 'sandbox_workspace_write.network_access=true'];
     const args = threadId
-      ? [...pre, 'exec', 'resume', ...common, threadId, '-']
-      : [...pre, 'exec', ...common, '-s', write ? 'workspace-write' : 'read-only', '-C', process.cwd(), '-'];
+      ? [...pre, 'exec', 'resume', ...common, ...sandbox, threadId, '-']
+      : [...pre, 'exec', ...common, ...sandbox, '-C', process.cwd(), '-'];
     let child;
     try { child = spawn(cmd, args, { cwd: process.cwd(), env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }); }
     catch (e) { return resolve({ error: '启动 codex 失败：' + e.message }); }
@@ -177,7 +186,7 @@ function report(r, write) {
 const TOOLS = [
   {
     name: 'codex_task',
-    description: `Delegate a self-contained sub-task to a Codex sub-agent (OpenAI ${MODEL}). It runs autonomously in the current working directory with its own tools (shell, file reading${WRITE_OK ? ', file editing' : ''}) and returns a final report. `
+    description: `Delegate a self-contained sub-task to a Codex sub-agent (OpenAI ${MODEL}). It runs autonomously with its own tools (shell, file reading${WRITE_OK ? ', file editing' : ''}${FULL ? ', full access to the whole computer and the network' : ''}) and returns a final report. `
       + 'Use it instead of doing large amounts of exploration, implementation or verification yourself: codebase-wide searches, reading many files, implementing a well-specified change, running and debugging tests, independent review / second opinion. '
       + 'The sub-agent CANNOT see this conversation: put everything it needs into the arguments. It cannot ask you questions. '
       + 'Calls take from ~20 seconds to many minutes. Verify key claims in its report before relying on them.',

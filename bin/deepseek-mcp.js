@@ -13,6 +13,8 @@ const MAX_OUT = 24000;
 const MODEL = process.env.DEEPSEEK_MODEL || '';
 const LEAD_PERM = process.env.DEEPSEEK_PERM;
 const WRITE_OK = process.env.DEEPSEEK_WRITE !== '0' && LEAD_PERM !== 'plan';
+// 完全权限：主模型不是「只规划」时，DeepSeek 用 bypassPermissions（所有工具、任意目录、联网），和 Claude 的权限一致
+const FULL = WRITE_OK;
 const NATIVE_TEST = process.env.DEEPSEEK_NATIVE_TEST === '1'; // 仅测试：使用默认 Claude 账号，不读取 DeepSeek 配置。
 const CONFIG_ERROR = 'DeepSeek 配置无效，请在网页的「子代理 → DeepSeek 设置」中设置 DeepSeek API 密钥并选择模型。';
 const WORKER_RULES = 'You are a literal worker executing a precise spec from a lead engineer. '
@@ -21,6 +23,7 @@ const WORKER_RULES = 'You are a literal worker executing a precise spec from a l
   + 'stop immediately and report BLOCKED at that step with what you found.';
 const STOP_RULE = 'Do not guess. If a step is impossible, ambiguous, or the code does not match what the step expects, '
   + 'STOP immediately and report BLOCKED at that step with what you found. Do not improvise a fix.';
+// WebSearch 是 Anthropic 服务端工具，DeepSeek 的接口不支持（WebFetch 可以用）
 const DISALLOWED = ['Task', 'Agent', 'AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode', 'WebSearch', 'CronCreate', 'ScheduleWakeup'];
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const READ_ALLOWED = ['Read', 'Glob', 'Grep', 'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)'];
@@ -114,7 +117,7 @@ function spawnClaude(args, env) {
 
 function fileList({ write, files }) {
   return [
-    write ? 'You may read, modify, or create only the files below.' : 'You may read only the files below. Do not create, edit, or delete any files.',
+    write ? 'You may modify or create only the files below (you may read anything you need).' : 'Do not create, edit, or delete any files. Start from the files below.',
     ...(files.length ? files.map((file) => '- ' + file) : ['- No files were listed.']),
   ];
 }
@@ -158,17 +161,17 @@ function tokenSummary(usage) {
 
 function runClaude(rpcId, { prompt, threadId, scope, toolUseId, config }, progress) {
   const { write } = scope;
-  const perm = !write ? 'default' : ['bypassPermissions', 'auto'].includes(LEAD_PERM) ? 'bypassPermissions' : 'acceptEdits';
+  const perm = FULL ? 'bypassPermissions' : 'default';
   const denied = [...DISALLOWED];
+  // 和主模型用同一套能力：加载项目的 .mcp.json / CLAUDE.md、用户的 settings.json（DEEPSEEK_SETTINGS），
+  // skills / plugins / agents / commands 由 claude-web 链接进 deepseek-home
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--model', MODEL,
-    '--permission-prompts', 'none', '--permission-mode', perm, '--append-system-prompt', WORKER_RULES,
-    // 避免项目配置加载额外的 MCP 工具、钩子或自动放行规则。
-    '--strict-mcp-config', '--setting-sources='];
+    '--permission-prompts', 'none', '--permission-mode', perm, '--append-system-prompt', WORKER_RULES];
+  if (process.env.DEEPSEEK_SETTINGS && fs.existsSync(process.env.DEEPSEEK_SETTINGS)) args.push('--settings', process.env.DEEPSEEK_SETTINGS);
   if (!write) {
-    denied.push(...EDIT_TOOLS, 'PowerShell');
-    args.push('--tools', 'Read,Glob,Grep,Bash', '--allowedTools', READ_ALLOWED.join(','));
-  } else if (perm === 'acceptEdits') {
-    denied.push('Bash', 'PowerShell');
+    // 只读任务：不给改文件的工具；完全权限下命令照样能跑（查资料、跑只读命令），否则只给读文件的工具
+    denied.push(...EDIT_TOOLS);
+    if (!FULL) { denied.push('PowerShell'); args.push('--tools', 'Read,Glob,Grep,Bash', '--allowedTools', READ_ALLOWED.join(',')); }
   }
   args.push('--disallowedTools', denied.join(','));
   if (threadId) args.push('--resume', threadId);

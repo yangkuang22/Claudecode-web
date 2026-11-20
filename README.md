@@ -111,7 +111,10 @@ ln -sf ~/claude-web/index.html ~/.claude-web/index.html
 
 - `bin/codex-mcp.js` 把 `codex exec` 包装成 MCP 工具，并把 Claude 写的委派内容套进固定的任务书模板（角色 / 任务 / 背景 / 约束 / 完成标准 / 汇报格式）。sol 系列默认思考强度和输出详细度都是 low，直接用效果差，这里默认用 high
 - Codex 的工作（读文件、跑命令、改代码）用的是 ChatGPT 订阅额度；Claude 只花写委派说明和读汇报的那部分
-- 权限：plan 模式下 Codex 只读；default 模式下每次委派会弹框确认；其它模式自动放行
+- 权限跟着主模型走：「只规划」时子代理只读；其它模式下子代理拥有完全权限（Codex 不开沙箱，DeepSeek 用 bypassPermissions：任意目录、联网、装软件）。「严格」模式下每次委派会先弹框确认
+- 工具：Codex 用它自己的工具和 `~/.codex` 里的配置 / skills；DeepSeek 跑的是 Claude Code，加载你的 settings.json、skills、plugins 和项目的 .mcp.json / CLAUDE.md（WebSearch 除外，DeepSeek 接口不支持）
+- 也可以选 Claude 自家模型（如 Sonnet）当子代理：用 Claude Code 自带的 Agent 子代理，固定成你选的模型；子代理过程同样显示在卡片里
+- 每条回复末尾显示各 Claude 模型分别用了多少 token，可以直接对比开不开子代理的差别
 - 预设只影响 Claude，不影响 Codex 的任务书
 - 怎么区分：带绿色边框和「GPT」标记的「Codex 子代理」卡片里是 GPT 的内容（Claude 写的任务书、GPT 的思考摘要、运行的命令、改的文件、最后交回的汇报），实时更新；卡片外面的文字、思考过程和其它工具调用都是 Claude 的
 - Codex 账号：「子代理 → Codex 账号」添加，每个账号一个 `CODEX_HOME` 目录，弹窗里 `codex login` 登录一次，切换不登出

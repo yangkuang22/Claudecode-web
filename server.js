@@ -265,7 +265,16 @@ const CODEX_LEAD_PROMPT = '\n\n# 子代理：Codex（重要）\n'
   + 'Codex 返回后，关键结论要抽查核实再告诉用户；需要补充或返工时用 mcp__codex__codex_continue 接着同一个 thread_id。'
   + '如果用户明确说「你自己做」「别用 Codex」，就照用户说的。';
 // 从 /api/chat 的请求里取子代理设置；没选 Codex 模型返回 null（= Claude 自己负责）
+// Claude 自家模型当子代理：用 Claude Code 自带的 Agent 子代理，CLAUDE_CODE_SUBAGENT_MODEL 指定模型
+const CLAUDE_SUB_LEAD_PROMPT = (model) => '\n\n# 子代理：Claude ' + model + '（重要）\n'
+  + '用户在网页里选择了让 ' + model + ' 当你的子代理（用 Agent 工具派出，模型已固定为 ' + model + '），目的是把具体的干活工作交给它、节省你（主模型）的额度和上下文。\n'
+  + '你的角色是主管：理解需求、拆分任务、写清楚任务说明、审核结果、和用户沟通。具体的干活默认用 Agent 工具交给子代理：\n'
+  + '- 需要读三个以上文件、在代码库里搜索或摸清结构\n- 写新代码、改多处代码、实现功能、重构\n- 跑测试、复现和排查 bug、装依赖、构建\n- 重要改动完成后的独立复查\n'
+  + '只有这些自己做：不用查代码就能回答的问题、一两行的小改动、核实结论时读一两个文件抽查。拿不准时委派。\n'
+  + '子代理看不到这段对话：prompt 里写清目标、背景、相关文件、约定和完成标准，并要求它最后汇报改了什么、怎么验证的。'
+  + '互不重叠的子任务可以在同一条回复里并行派出。如果用户明确说「你自己做」「别用子代理」，就照用户说的。';
 function subagentFrom(body) {
+  if (typeof body.claudeSubModel === 'string' && /^[\w.\-\[\]]+$/.test(body.claudeSubModel)) return { kind: 'claude', model: body.claudeSubModel };
   if (typeof body.dsModel === 'string' && /^[\w.\-:/]+$/.test(body.dsModel)) return { kind: 'deepseek', model: body.dsModel };
   if (typeof body.codexModel !== 'string' || !/^[\w.\-]+$/.test(body.codexModel)) return null;
   return { kind: 'codex', model: body.codexModel, effort: CODEX_EFFORTS.includes(body.codexEffort) ? body.codexEffort : 'high', account: typeof body.codexAccount === 'string' ? body.codexAccount : 'default' };
@@ -326,8 +335,19 @@ async function deepseekListModels(cfg) {
   const j = await httpsGetJson(u.href, { Authorization: 'Bearer ' + cfg.apiKey });
   return (j.data || []).map((m) => m.id).filter((x) => typeof x === 'string');
 }
+// 把 ~/.claude 里的 skills / plugins / agents / commands 链接进 dir（Windows 用 junction），让嵌套的 claude 也能用
+function linkClaudeShared(dir, names) {
+  fs.mkdirSync(dir, { recursive: true });
+  for (const n of names) {
+    const target = path.join(CLAUDE_HOME, n), link = path.join(dir, n);
+    try { fs.lstatSync(link); continue; } catch {}
+    if (!fs.existsSync(target)) continue;
+    try { fs.symlinkSync(target, link, IS_WIN ? 'junction' : 'dir'); } catch (e) { console.error(`  [子代理] 链接 ${link} 失败：${e.message}`); }
+  }
+}
 function deepseekMcpConfig(sub, permissionMode, tmpFile, runId, eventKey) {
-  const env = { CLAUDE_BIN, DEEPSEEK_CONFIG: DS_FILE, DEEPSEEK_MODEL: sub.model, DEEPSEEK_HOME: DS_HOME,
+  linkClaudeShared(DS_HOME, ['skills', 'plugins', 'agents', 'commands']); // 不链 projects：DeepSeek 的会话不混进你的会话列表
+  const env = { CLAUDE_BIN, DEEPSEEK_SETTINGS: path.join(CLAUDE_HOME, 'settings.json'), DEEPSEEK_CONFIG: DS_FILE, DEEPSEEK_MODEL: sub.model, DEEPSEEK_HOME: DS_HOME,
     DEEPSEEK_PERM: permissionMode || 'default', DEEPSEEK_WRITE: permissionMode === 'plan' ? '0' : '1', CLAUDE_WEB_EVENTS: eventsUrl(runId, eventKey) };
   return tmpFile(JSON.stringify({ mcpServers: { deepseek: { type: 'stdio', command: process.execPath, args: [DS_MCP], env, timeout: 3600000, alwaysLoad: true } } }));
 }
@@ -737,7 +757,10 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   };
   // Codex 子代理：挂 MCP、关掉 Claude 自带子代理；自动放行 codex 工具（default / plan 模式下仍会弹框问）
   let webPrompt = WEB_PROMPT;
-  if (subagent && subagent.kind === 'deepseek') {
+  if (subagent && subagent.kind === 'claude') {
+    cliArgs.push('--forward-subagent-text'); // 子代理的文字和思考也输出，网页显示在子代理卡片里
+    webPrompt += CLAUDE_SUB_LEAD_PROMPT(subagent.model);
+  } else if (subagent && subagent.kind === 'deepseek') {
     cliArgs.push('--mcp-config', deepseekMcpConfig(subagent, permissionMode, tmpFile, runId, eventKey), '--disallowedTools', 'Task,Agent');
     if (['acceptEdits', 'auto', 'bypassPermissions'].includes(permissionMode)) cliArgs.push('--allowedTools', 'mcp__deepseek__deepseek_task,mcp__deepseek__deepseek_continue');
     webPrompt += DEEPSEEK_LEAD_PROMPT;
@@ -758,6 +781,7 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
     cliArgs.push('--append-system-prompt', webPrompt);
   }
   const env = claudeEnv(account);
+  if (subagent && subagent.kind === 'claude') { env.CLAUDE_CODE_SUBAGENT_MODEL = subagent.model; env.CLAUDE_CODE_SUBAGENT_MODEL_FORCE = '1'; }
   // root 用户下 Claude Code 默认拒绝 bypassPermissions，IS_SANDBOX=1 可解除这个限制
   if (permissionMode === 'bypassPermissions') env.IS_SANDBOX = '1';
 
@@ -785,6 +809,13 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
         if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) { r.sessionId = ev.session_id; saveInject(r.sessionId, { head }); }
         if (ev.type === 'user' && !ev.parent_tool_use_id && Array.isArray(ev.message?.content)
             && !ev.message.content.some((b) => b.type === 'tool_result')) continue; // 用户消息回显，前端已显示
+        if (ev.parent_tool_use_id && ev.type !== 'control_request') {
+          for (const x of subagentEvents(ev)) {
+            r.push(JSON.stringify(x));
+            try { fs.mkdirSync(CODEX_TRACE_DIR, { recursive: true }); fs.appendFileSync(path.join(CODEX_TRACE_DIR, x.tool_use_id + '.jsonl'), JSON.stringify({ ...x, at: Date.now() }) + '\n'); } catch {}
+          }
+          continue;
+        }
         if (ev.type === 'control_request' && ev.request_id) {
           if (ev.request?.subtype === 'can_use_tool') r.asks.set(ev.request_id, ev.request);
           else { // 其它控制请求网页处理不了，直接回错误，免得 claude 一直等
@@ -819,6 +850,33 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   // 能回答权限请求时 stdin 保持打开（收到 result 再关），否则和以前一样写完就关
   if (PROMPT_TOOL_FLAG) writeStdin(r, first); else child.stdin.end(JSON.stringify(first) + '\n');
   return r;
+}
+// Claude 子代理（parent_tool_use_id 不为空）的消息 → 和 Codex / DeepSeek 一样的过程事件
+function subagentEvents(ev) {
+  const id = ev.parent_tool_use_id;
+  if (!TOOL_ID_RE.test(id || '')) return [];
+  const out = [], c = ev.message && Array.isArray(ev.message.content) ? ev.message.content : [];
+  const brief = (name, inp) => {
+    inp = inp || {};
+    const a = inp.command || inp.file_path || inp.notebook_path || inp.pattern || inp.url || inp.query || inp.description || '';
+    return (name + ' ' + String(a)).trim().slice(0, 300);
+  };
+  if (ev.type === 'assistant') {
+    for (const b of c) {
+      if (b.type === 'text' && b.text) out.push({ kind: 'message', text: b.text });
+      else if (b.type === 'thinking' && b.thinking) out.push({ kind: 'reasoning', text: b.thinking });
+      else if (b.type === 'tool_use') {
+        out.push({ kind: 'cmd_start', id: b.id, text: brief(b.name, b.input) });
+        if (['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(b.name) && b.input) out.push({ kind: 'files', text: String(b.input.file_path || b.input.notebook_path || '') });
+      }
+    }
+  } else if (ev.type === 'user') {
+    for (const b of c) if (b.type === 'tool_result') {
+      const t = typeof b.content === 'string' ? b.content : Array.isArray(b.content) ? b.content.filter((x) => x.type === 'text').map((x) => x.text).join('\n') : '';
+      out.push({ kind: 'cmd', id: b.tool_use_id, text: '', code: b.is_error ? 1 : 0, output: String(t).slice(-3000) });
+    }
+  }
+  return out.map((x) => ({ type: 'web_codex', tool_use_id: id, ...x, text: String(x.text || '').slice(0, 20000) }));
 }
 function writeStdin(r, obj) {
   try { if (!r.done && r.child.stdin.writable) { r.child.stdin.write(JSON.stringify(obj) + '\n'); return true; } } catch {}
@@ -1459,7 +1517,8 @@ const server = http.createServer(async (req, res) => {
           if (typeof body.account === 'string' && getAccount(body.account)) cur.account = body.account;
           if (typeof body.codexModel === 'string' && /^[\w.\-]*$/.test(body.codexModel)) cur.codexModel = body.codexModel;
           if (CODEX_EFFORTS.includes(body.codexEffort)) cur.codexEffort = body.codexEffort;
-          if (['claude', 'codex', 'deepseek'].includes(body.subKind)) cur.subKind = body.subKind;
+          if (['claude', 'claudesub', 'codex', 'deepseek'].includes(body.subKind)) cur.subKind = body.subKind;
+          if (typeof body.claudeSubModel === 'string' && /^[\w.\-\[\]]*$/.test(body.claudeSubModel)) cur.claudeSubModel = body.claudeSubModel;
           if (typeof body.dsModel === 'string' && /^[\w.\-:/]*$/.test(body.dsModel)) cur.dsModel = body.dsModel;
           if (typeof body.codexAccount === 'string' && getCodexAccount(body.codexAccount)) cur.codexAccount = body.codexAccount;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
@@ -1499,6 +1558,7 @@ const server = http.createServer(async (req, res) => {
         if (activeRun(cwd)) return json(res, 409, { error: '这个项目上一条消息还在处理中' });
         if (body.dsModel && !loadDeepseek().apiKey) return json(res, 400, { error: '还没设置 DeepSeek API Key：在「子代理 → DeepSeek 设置」里填写' });
         if (body.dsModel) delete body.codexModel;
+        if (body.claudeSubModel) { delete body.codexModel; delete body.dsModel; }
         if (body.codexModel && !CODEX_BIN) return json(res, 400, { error: '没有找到 Codex（codex 命令），子代理请先切回「Claude」' });
         if (body.codexModel && !getCodexAccount(body.codexAccount)) return json(res, 400, { error: '选中的 Codex 账号已经不存在了，请重新选择' });
         if (body.codexModel && !codexAccountStatus(getCodexAccount(body.codexAccount)).loggedIn) return json(res, 400, { error: 'Codex 账号还没登录：在「子代理」里点「Codex 账号」登录' });

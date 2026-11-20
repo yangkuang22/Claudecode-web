@@ -117,6 +117,15 @@ ln -sf ~/claude-web/index.html ~/.claude-web/index.html
 - Codex 账号：「子代理 → Codex 账号」添加，每个账号一个 `CODEX_HOME` 目录，弹窗里 `codex login` 登录一次，切换不登出
 - 开了出口锁时 Codex 也走同一个代理（继承 `HTTPS_PROXY`），但防火墙规则只管 claude.exe，不管 codex
 
+## DeepSeek 子代理（可选）
+
+「子代理」里也可以选 DeepSeek（用你自己的 API Key，按量计费）。第一次在「DeepSeek 设置」里填 Key，Key 存在本机 `~/.claude-web/deepseek.json`，网页只显示末 4 位。
+
+- 实现：`bin/deepseek-mcp.js` 用 DeepSeek 的 Anthropic 兼容接口（`https://api.deepseek.com/anthropic`）跑一个嵌套的 `claude -p`，配置目录独立（`~/.claude-web/deepseek-home`），不会用到你的 Anthropic 登录，会话也不会混进列表
+- 和 GPT 的区别：DeepSeek 较弱，工具要求 Claude 写出**逐步的 steps**、可碰的文件清单、禁止事项和要交回的内容；DeepSeek 遇到和步骤不符的情况会停下报 BLOCKED，不自己拿主意。Claude 负责所有判断，DeepSeek 负责把决定「打成代码 / 跑出结果」
+- 卡片是蓝色、标记「DS」
+- 主模型用 Opus 时委派最积极；Sonnet 当主模型时经常选择自己做
+
 ## 多账号
 
 每个账号用一个独立的 Claude Code 配置目录（`~/.claude-web/accounts/<id>/`），各自登录一次后一直保持登录。切换账号只是换一个目录启动 claude，**不会登出任何账号**。

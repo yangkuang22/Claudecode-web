@@ -140,6 +140,9 @@ details.thinking .tb { padding: 6px 12px 10px; color: var(--muted); white-space:
 .notice.err { color: var(--err); }
 /* Codex（GPT）子代理卡片：绿色左边框 + GPT 标记，里面是 GPT 的过程 */
 details.tool.codex { border-left: 3px solid #10a37f; }
+details.tool.codex.ds { border-left-color: #4d6bfe; }
+.gpt-badge.ds { background: #4d6bfe; }
+.cx-brief ol { margin: 2px 0 2px 18px; padding: 0; }
 .gpt-badge { font-size: 10.5px; font-weight: 700; color: #fff; background: #10a37f; border-radius: 4px; padding: 0 5px; margin-right: 6px; letter-spacing: .3px; }
 .cx-sec { font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
 .cx-brief { border: 1px dashed var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
@@ -722,23 +725,33 @@ function toolInputHtml(name, inp) {
     const add = String(inp.new_string || '').split('\n').map((l) => `<span class="diff-add">+ ${esc(l)}</span>`).join('\n');
     return `<pre class="tin">${clip(del + '\n' + add, 20000)}</pre>`;
   }
-  if (name === 'mcp__codex__codex_task' || name === 'mcp__codex__codex_continue') {
+  if (isCodexTool(name)) {
     const row = (k, v) => (v ? `<div><b>${k}</b>${esc(Array.isArray(v) ? v.join('、') : String(v))}</div>` : '');
-    return '<div class="cx-sec">Claude 交给 GPT 的任务书</div><div class="cx-brief">'
-      + row('任务', inp.task || inp.message) + row('背景', inp.context) + row('相关文件', inp.files) + row('完成标准', inp.done_criteria)
+    const steps = Array.isArray(inp.steps) && inp.steps.length ? `<div><b>步骤</b><ol>${inp.steps.map((s) => `<li>${esc(s)}</li>`).join('')}</ol></div>` : '';
+    return `<div class="cx-sec">Claude 交给 ${SUB_TOOLS[name].who} 的任务书</div><div class="cx-brief">`
+      + row('任务', inp.task || inp.message) + steps + row('背景', inp.context) + row('相关文件', inp.files) + row('完成标准', inp.done_criteria)
+      + row('禁止', inp.do_not) + row('要交回', inp.expected_output)
       + row('方式', inp.mode === 'write' ? '可以改文件' : inp.mode ? '只读' : '') + row('思考强度', inp.effort) + row('接着', inp.thread_id) + '</div>';
   }
   if (name === 'Bash') return `<pre class="tin">$ ${esc(inp.command || '')}</pre>`;
   if (name === 'Write') return `<pre class="tin">${esc(clip(String(inp.content || ''), 6000))}</pre>`;
   return `<pre class="tin">${esc(clip(JSON.stringify(inp, null, 2), 6000))}</pre>`;
 }
-const TOOL_LABEL = { mcp__codex__codex_task: 'Codex 子代理', mcp__codex__codex_continue: 'Codex 追问' };
-const isCodexTool = (n) => n === 'mcp__codex__codex_task' || n === 'mcp__codex__codex_continue';
+// 子代理工具：卡片标题、标记、颜色
+const SUB_TOOLS = {
+  mcp__codex__codex_task: { label: 'Codex 子代理', who: 'GPT', badge: 'GPT', cls: '' },
+  mcp__codex__codex_continue: { label: 'Codex 追问', who: 'GPT', badge: 'GPT', cls: '' },
+  mcp__deepseek__deepseek_task: { label: 'DeepSeek 子代理', who: 'DeepSeek', badge: 'DS', cls: 'ds' },
+  mcp__deepseek__deepseek_continue: { label: 'DeepSeek 追问', who: 'DeepSeek', badge: 'DS', cls: 'ds' },
+};
+const TOOL_LABEL = Object.fromEntries(Object.entries(SUB_TOOLS).map(([k, v]) => [k, v.label]));
+const isCodexTool = (n) => !!SUB_TOOLS[n]; // 所有子代理工具（Codex / DeepSeek）
 function addTool(id, name, inp) {
   const cx = isCodexTool(name);
-  const d = el('details', 'tool' + (cx ? ' codex' : ''));
-  d.innerHTML = `<summary>${cx ? '<span class="gpt-badge">GPT</span>' : ''}<span class="tname">${esc(TOOL_LABEL[name] || name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary>`
-    + (cx ? '<div class="tbody"><div class="cx-in"></div><div class="cx-sec">GPT 的过程（思考摘要 / 命令 / 说明）</div><div class="cx-log"></div></div>' : '<div class="tbody"></div>');
+  const st = SUB_TOOLS[name];
+  const d = el('details', 'tool' + (cx ? ' codex ' + st.cls : ''));
+  d.innerHTML = `<summary>${cx ? `<span class="gpt-badge ${st.cls}">${st.badge}</span>` : ''}<span class="tname">${esc(TOOL_LABEL[name] || name)}</span><span class="targ"></span><span class="tstat"><span class="spin"></span></span></summary>`
+    + (cx ? `<div class="tbody"><div class="cx-in"></div><div class="cx-sec">${st.who} 的过程（思考 / 命令 / 说明）</div><div class="cx-log"></div></div>` : '<div class="tbody"></div>');
   d._name = name; d._json = '';
   if (cx && id) {
     d._id = id;
@@ -764,7 +777,7 @@ function setToolResult(id, content, isError) {
   if (txt && isCodexTool(d._name)) {
     // GPT 的最终汇报（这是 Claude 收到的全部内容）
     const [rep, meta] = txt.split('\n\n---\n');
-    const w = el('div', 'cx-result'); w.innerHTML = '<div class="cx-sec">GPT 交回给 Claude 的汇报</div>';
+    const w = el('div', 'cx-result'); w.innerHTML = `<div class="cx-sec">${SUB_TOOLS[d._name].who} 交回给 Claude 的汇报</div>`;
     const m = el('div', 'md'); m.innerHTML = md(rep); w.appendChild(m);
     if (meta) { const x = el('pre', 'tout'); x.textContent = clip(meta, 4000); w.appendChild(x); }
     d.querySelector('.tbody').appendChild(w);
@@ -788,7 +801,7 @@ function addCodexEvent(ev, card) {
   const log = d.querySelector('.cx-log'); if (!log) return;
   const add = (cls, text) => { const e = el('div', 'cx-ev ' + cls); e.textContent = text; log.appendChild(e); return e; };
   if (!card) { d._live = true; d._traceLoaded = true; }
-  const live = (t) => { if (!card) d.querySelector('.targ').textContent = 'GPT：' + t.replace(/\s+/g, ' ').slice(0, 120); };
+  const live = (t) => { if (!card) d.querySelector('.targ').textContent = SUB_TOOLS[d._name].who + '：' + t.replace(/\s+/g, ' ').slice(0, 120); };
   switch (ev.kind) {
     case 'start': add('start', '▶ ' + ev.text); live('开始工作…'); break;
     case 'reasoning': add('reasoning', ev.text); live('💭 ' + ev.text); break;
@@ -1080,7 +1093,8 @@ async function send() {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: S.ctrl.signal,
       body: JSON.stringify({
         cwd: S.cwd, message: text, sessionId: S.sessionId, model: prefs.model, effort: prefs.effort, permissionMode: prefs.perm, thinking: prefs.thinking, account: prefs.account,
-        codexModel: prefs.codexModel, codexEffort: prefs.codexEffort, codexAccount: prefs.codexAccount,
+        codexModel: prefs.subKind === 'codex' ? prefs.codexModel : '', codexEffort: prefs.codexEffort, codexAccount: prefs.codexAccount,
+        dsModel: prefs.subKind === 'deepseek' ? prefs.dsModel : '',
         preset: prefs.preset,
         attachments: atts.map((a) => ({ path: a.path, name: a.name })), rewindTo,
       }),
@@ -1623,31 +1637,67 @@ async function loadCodex() {
   renderPills();
 }
 const EFFORT_CN = { low: '低', medium: '中', high: '高', xhigh: '很高' };
+let DS = { configured: false, keyHint: '', baseUrl: '', models: [] };
+async function loadDeepseek() { try { DS = await getJSON('/api/deepseek'); } catch {} }
 async function openSubagent() {
-  await loadCodex();
-  const opts = [['claude', 'Claude 自己', '不用 Codex：子任务也由 Claude 的子代理负责（全部消耗 Claude 额度）']];
+  await Promise.all([loadCodex(), loadDeepseek()]);
+  const opts = [['claude', 'Claude 自己', '不用外部子代理：子任务也由 Claude 的子代理负责（全部消耗 Claude 额度）']];
+  opts.push(['#', 'Codex / GPT（聪明：给目标和背景，让它自己查、自己做）']);
   if (!CODEX.available) opts.push(['#', '没有找到 Codex（codex 命令），装好并登录后刷新页面']);
   else {
-    opts.push(['#', 'Codex 模型（Claude 当主模型，子任务交给它）']);
-    for (const m of CODEX.models) opts.push([m.slug, m.name, `${m.slug} · ${m.desc}`]);
-    opts.push(['__custom', '自定义模型…', '手动输入 Codex 模型名']);
+    for (const m of CODEX.models) opts.push(['codex:' + m.slug, m.name, `${m.slug} · ${m.desc}`]);
+    opts.push(['__custom', '自定义 Codex 模型…', '手动输入 Codex 模型名']);
     const ca = CODEX.accounts.find((a) => a.id === prefs.codexAccount);
-    opts.push(['#', 'Codex 设置']);
-    opts.push(['__effort', `思考强度：${prefs.codexEffort}（${EFFORT_CN[prefs.codexEffort] || ''}）`, 'sol 系列默认只有 low，委派任务建议 high；Claude 也可以按任务单独指定']);
-    opts.push(['__account', `Codex 账号：${ca ? ca.name : '?'}`, ca ? codexAcctDesc(ca) : '']);
+    opts.push(['__effort', `　Codex 思考强度：${prefs.codexEffort}（${EFFORT_CN[prefs.codexEffort] || ''}）`, 'sol 系列默认只有 low，委派任务建议 high；Claude 也可以按任务单独指定']);
+    opts.push(['__account', `　Codex 账号：${ca ? ca.name : '?'}`, ca ? codexAcctDesc(ca) : '']);
   }
-  const cur = prefs.codexModel || 'claude';
-  pick('子代理', opts, CODEX.models.some((m) => m.slug === cur) || cur === 'claude' ? cur : '__custom', (v) => {
+  opts.push(['#', 'DeepSeek（便宜但较弱：Claude 写好逐步步骤，它照做，不自己判断）']);
+  if (!DS.configured) opts.push(['__ds', '设置 DeepSeek API Key…', '用你自己的 DeepSeek API（按量计费）']);
+  else {
+    for (const m of DS.models) opts.push(['ds:' + m, m, m === 'deepseek-reasoner' ? '推理模型：更慢，适合需要多想一步的步骤' : m === 'deepseek-chat' ? '通用模型：快，适合机械改动' : '']);
+    opts.push(['__ds', `　DeepSeek 设置（Key ${DS.keyHint}）`, '修改 API Key / 接口地址，刷新模型列表']);
+  }
+  const cur = prefs.subKind === 'codex' ? (CODEX.models.some((m) => m.slug === prefs.codexModel) ? 'codex:' + prefs.codexModel : '__custom')
+    : prefs.subKind === 'deepseek' ? 'ds:' + prefs.dsModel : 'claude';
+  pick('子代理', opts, cur, (v) => {
     if (v === '__effort') return pick('Codex 思考强度', CODEX.efforts.map((e) => [e, `${e}（${EFFORT_CN[e] || e}）`, e === 'high' ? '推荐' : e === 'xhigh' ? '难题、复杂调试；更慢、更耗 Codex 额度' : e === 'low' ? '只适合简单查找' : '']),
       prefs.codexEffort, (e) => setPref('codexEffort', e));
     if (v === '__account') return openCodexAccounts();
+    if (v === '__ds') return openDeepseekSettings();
     if (v === '__custom') {
       const n = prompt('Codex 模型名（如 gpt-6.2-sol）：', prefs.codexModel);
-      if (n && /^[\w.\-]+$/.test(n.trim())) setPref('codexModel', n.trim());
+      if (n && /^[\w.\-]+$/.test(n.trim())) { setPref('codexModel', n.trim()); setPref('subKind', 'codex'); }
       return;
     }
-    setPref('codexModel', v === 'claude' ? '' : v);
-    toast(v === 'claude' ? '子代理：Claude 自己负责' : `子代理：Codex ${v}（从下一条消息开始）`);
+    if (v === 'claude') { setPref('subKind', 'claude'); return toast('子代理：Claude 自己负责'); }
+    if (v.startsWith('codex:')) { setPref('codexModel', v.slice(6)); setPref('subKind', 'codex'); return toast(`子代理：Codex ${v.slice(6)}（从下一条消息开始）`); }
+    if (v.startsWith('ds:')) { setPref('dsModel', v.slice(3)); setPref('subKind', 'deepseek'); return toast(`子代理：DeepSeek ${v.slice(3)}（从下一条消息开始）`); }
+  });
+}
+function openDeepseekSettings() {
+  const opts = [
+    ['__key', DS.configured ? `API Key：${DS.keyHint}（点击修改）` : '填写 API Key', '保存在本机 ~/.claude-web/deepseek.json，网页只显示末 4 位'],
+    ['__url', '接口地址：' + (DS.baseUrl || ''), 'DeepSeek 的 Anthropic 兼容接口，一般不用改'],
+    ['__test', '测试连接并刷新模型列表', '用 Key 请求一次模型列表（开了出口锁会走代理）'],
+  ];
+  pick('DeepSeek 设置', opts, '', async (v) => {
+    try {
+      if (v === '__key') {
+        const k = prompt('DeepSeek API Key（sk- 开头）：'); if (k == null || !k.trim()) return;
+        DS = await getJSON('/api/deepseek', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: k.trim() }) });
+        toast('已保存，正在测试…'); v = '__test';
+      }
+      if (v === '__url') {
+        const u = prompt('接口地址：', DS.baseUrl); if (!u || !u.trim()) return;
+        DS = await getJSON('/api/deepseek', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: u.trim() }) });
+        return toast('已保存');
+      }
+      if (v === '__test') {
+        DS = await getJSON('/api/deepseek', { method: 'POST' });
+        toast('连接成功，可用模型：' + DS.models.join('、'));
+        if (!DS.models.includes(prefs.dsModel)) setPref('dsModel', DS.models[0] || 'deepseek-chat');
+      }
+    } catch (e) { toast(e.message); }
   });
 }
 function codexAcctDesc(a) {
@@ -1808,7 +1858,10 @@ const THINKS = [
   ['omitted', '不显示', '不返回思考内容（Claude Code 默认），只留一个「思考过程」占位'],
 ];
 const prefs = { model: store.get('model', ''), effort: store.get('effort', ''), perm: store.get('perm', 'acceptEdits'), thinking: store.get('thinking', 'summarized'), account: store.get('account', 'default'), preset: store.get('preset', ''),
-  codexModel: store.get('codexModel', ''), codexEffort: store.get('codexEffort', 'high'), codexAccount: store.get('codexAccount', 'default') };
+  codexModel: store.get('codexModel', ''), codexEffort: store.get('codexEffort', 'high'), codexAccount: store.get('codexAccount', 'default'),
+  dsModel: store.get('dsModel', 'deepseek-chat') };
+// 子代理种类：claude / codex / deepseek（旧版只有 codexModel，有值就是 codex）
+prefs.subKind = store.get('subKind', prefs.codexModel ? 'codex' : 'claude');
 const labelOf = (list, v) => (list.find((x) => x[0] === v) || [v, v.replace(/^claude-/, '')])[1];
 function renderPills() {
   $('modelPill').querySelector('b').textContent = prefs.model ? labelOf(MODELS, prefs.model) : '默认';
@@ -1818,8 +1871,9 @@ function renderPills() {
   $('accountPill').querySelector('b').textContent = acct ? acct.name : prefs.account === 'default' ? '默认' : '?';
   $('accountPill').classList.toggle('warn', !!acct && !acct.loggedIn);
   const cm = CODEX.models.find((m) => m.slug === prefs.codexModel);
-  $('subPill').querySelector('b').textContent = prefs.codexModel ? (cm ? cm.name : prefs.codexModel) + ' · ' + prefs.codexEffort : 'Claude';
-  $('subPill').classList.toggle('warn', !!prefs.codexModel);
+  $('subPill').querySelector('b').textContent = prefs.subKind === 'codex' && prefs.codexModel ? (cm ? cm.name : prefs.codexModel) + ' · ' + prefs.codexEffort
+    : prefs.subKind === 'deepseek' ? prefs.dsModel : 'Claude';
+  $('subPill').classList.toggle('warn', prefs.subKind !== 'claude');
   $('permPill').querySelector('b').textContent = labelOf(PERMS, prefs.perm);
   $('permPill').classList.toggle('warn', prefs.perm === 'bypassPermissions');
   $('presetPill').querySelector('b').textContent = prefs.preset ? prefs.preset.replace(/\.json$/, '').slice(0, 10) : '关';
@@ -1833,7 +1887,7 @@ function setPref(k, v) {
 getJSON('/api/prefs').then((p) => {
   // 服务端还没有记录：把这个浏览器里原有的选择存上去
   if (!Object.keys(p).length) return fetch('/api/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(prefs) });
-  for (const k of ['model', 'effort', 'perm', 'thinking', 'account', 'codexModel', 'codexEffort', 'codexAccount']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
+  for (const k of ['model', 'effort', 'perm', 'thinking', 'account', 'codexModel', 'codexEffort', 'codexAccount', 'subKind', 'dsModel']) if (typeof p[k] === 'string') { prefs[k] = p[k]; store.set(k, p[k]); }
   renderPills();
 }).catch(() => {});
 

@@ -233,13 +233,17 @@ function codexModels() {
   return [];
 }
 // 给 claude 的 MCP 配置文件
+// 子代理过程事件的回传地址（codex-mcp.js / deepseek-mcp.js POST 到这里）
+function eventsUrl(runId, eventKey) {
+  const host = ['0.0.0.0', '::', 'localhost'].includes(HOST) ? '127.0.0.1' : HOST;
+  return `http://${host}:${PORT}/api/codex-event?` + new URLSearchParams({ run: runId, k: eventKey, ...(TOKEN ? { t: TOKEN } : {}) });
+}
 function codexMcpConfig(sub, permissionMode, tmpFile, runId, eventKey) {
   const acct = getCodexAccount(sub.account) || CODEX_DEFAULT;
   const env = { CODEX_BIN, CODEX_MODEL: sub.model, CODEX_EFFORT: sub.effort || 'high', CODEX_WRITE: permissionMode === 'plan' ? '0' : '1' };
   if (!acct.isDefault) env.CODEX_HOME = acct.dir;
   // Codex 的过程实时发回网页（/api/codex-event）
-  const host = ['0.0.0.0', '::', 'localhost'].includes(HOST) ? '127.0.0.1' : HOST;
-  env.CLAUDE_WEB_EVENTS = `http://${host}:${PORT}/api/codex-event?` + new URLSearchParams({ run: runId, k: eventKey, ...(TOKEN ? { t: TOKEN } : {}) });
+  env.CLAUDE_WEB_EVENTS = eventsUrl(runId, eventKey);
   // alwaysLoad：工具说明直接放进 Claude 的工具列表。不加的话 MCP 工具被放进「延迟加载」，
   // Claude 只看到名字、要先 ToolSearch 才知道怎么用，实际几乎不会去用。
   // timeout：单次调用的硬上限（毫秒）。Codex 做大任务可能要很久
@@ -262,9 +266,87 @@ const CODEX_LEAD_PROMPT = '\n\n# 子代理：Codex（重要）\n'
   + '如果用户明确说「你自己做」「别用 Codex」，就照用户说的。';
 // 从 /api/chat 的请求里取子代理设置；没选 Codex 模型返回 null（= Claude 自己负责）
 function subagentFrom(body) {
+  if (typeof body.dsModel === 'string' && /^[\w.\-:/]+$/.test(body.dsModel)) return { kind: 'deepseek', model: body.dsModel };
   if (typeof body.codexModel !== 'string' || !/^[\w.\-]+$/.test(body.codexModel)) return null;
-  return { model: body.codexModel, effort: CODEX_EFFORTS.includes(body.codexEffort) ? body.codexEffort : 'high', account: typeof body.codexAccount === 'string' ? body.codexAccount : 'default' };
+  return { kind: 'codex', model: body.codexModel, effort: CODEX_EFFORTS.includes(body.codexEffort) ? body.codexEffort : 'high', account: typeof body.codexAccount === 'string' ? body.codexAccount : 'default' };
 }
+
+// ============ DeepSeek 子代理：用 DeepSeek 的 Anthropic 兼容接口跑一个嵌套的 claude -p ============
+// API Key 存在 ~/.claude-web/deepseek.json（不进仓库，网页只显示末 4 位）。嵌套 claude 用独立配置目录 deepseek-home，
+// 不会用到也不会发出你的 Anthropic 登录凭据；会话也不会混进你的会话列表。
+// DeepSeek 比 GPT 弱，工具要求 Claude 写出逐步的步骤（steps）和文件清单，DeepSeek 遇到不确定就停下汇报，不自己拿主意。
+const DS_MCP = path.join(__dirname, 'bin', 'deepseek-mcp.js');
+const DS_FILE = path.join(DATA_DIR, 'deepseek.json');
+const DS_HOME = path.join(DATA_DIR, 'deepseek-home');
+const DS_DEFAULT_BASE = 'https://api.deepseek.com/anthropic';
+const DS_DEFAULT_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+function loadDeepseek() {
+  try { const d = JSON.parse(fs.readFileSync(DS_FILE, 'utf8')); return { apiKey: d.apiKey || '', baseUrl: d.baseUrl || DS_DEFAULT_BASE, models: Array.isArray(d.models) && d.models.length ? d.models : DS_DEFAULT_MODELS }; }
+  catch { return { apiKey: '', baseUrl: DS_DEFAULT_BASE, models: DS_DEFAULT_MODELS }; }
+}
+const saveDeepseek = (d) => fs.writeFileSync(DS_FILE, JSON.stringify(d, null, 2) + '\n', { mode: 0o600 });
+// HTTPS GET 返回 JSON；开了出口锁就经代理（CONNECT），零依赖
+function httpsGetJson(target, headers) {
+  return new Promise((resolve, reject) => {
+    const tu = new URL(target);
+    if (tu.protocol !== 'https:') return reject(new Error('只支持 https'));
+    const port = +tu.port || 443;
+    let done = false;
+    const fin = (err, v) => { if (done) return; done = true; clearTimeout(timer); err ? reject(err) : resolve(v); };
+    const timer = setTimeout(() => fin(new Error('超时')), 20000);
+    const talk = (socket) => {
+      const s = tls.connect({ socket, host: socket ? undefined : tu.hostname, port, servername: tu.hostname }, () => {
+        s.write(`GET ${tu.pathname}${tu.search} HTTP/1.0\r\nHost: ${tu.hostname}\r\nConnection: close\r\nAccept: application/json\r\n`
+          + Object.entries(headers || {}).map(([k, v]) => `${k}: ${v}\r\n`).join('') + '\r\n');
+      });
+      let b = Buffer.alloc(0);
+      s.on('data', (d) => { b = Buffer.concat([b, d]); if (b.length > 2e6) s.destroy(); });
+      s.on('close', () => {
+        const t = b.toString('utf8'), i = t.indexOf('\r\n\r\n');
+        const status = +(t.match(/^HTTP\/\S+ (\d+)/) || [])[1] || 0;
+        const body = t.slice(i + 4); // 请求用 HTTP/1.0，响应不会是 chunked
+        let j = null; try { j = JSON.parse(body); } catch {}
+        if (status !== 200) return fin(new Error(`HTTP ${status}${j && j.error ? '：' + (j.error.message || JSON.stringify(j.error)) : ''}`));
+        j ? fin(null, j) : fin(new Error('返回的不是 JSON'));
+      });
+      s.on('error', (e) => fin(e));
+    };
+    if (!EGRESS) return talk(null);
+    const pu = new URL(EGRESS.proxy);
+    const req = http.request({ host: pu.hostname, port: +pu.port || 80, method: 'CONNECT', path: `${tu.hostname}:${port}`, agent: false });
+    req.on('connect', (res, socket) => (res.statusCode === 200 ? talk(socket) : fin(new Error('代理返回 ' + res.statusCode))));
+    req.on('error', (e) => fin(e));
+    req.end();
+  });
+}
+// 用 OpenAI 兼容接口列出模型（https://api.deepseek.com/anthropic → https://api.deepseek.com/models）
+async function deepseekListModels(cfg) {
+  const u = new URL(cfg.baseUrl);
+  u.pathname = u.pathname.replace(/\/anthropic\/?$/, '').replace(/\/$/, '') + '/models';
+  const j = await httpsGetJson(u.href, { Authorization: 'Bearer ' + cfg.apiKey });
+  return (j.data || []).map((m) => m.id).filter((x) => typeof x === 'string');
+}
+function deepseekMcpConfig(sub, permissionMode, tmpFile, runId, eventKey) {
+  const env = { CLAUDE_BIN, DEEPSEEK_CONFIG: DS_FILE, DEEPSEEK_MODEL: sub.model, DEEPSEEK_HOME: DS_HOME,
+    DEEPSEEK_PERM: permissionMode || 'default', DEEPSEEK_WRITE: permissionMode === 'plan' ? '0' : '1', CLAUDE_WEB_EVENTS: eventsUrl(runId, eventKey) };
+  return tmpFile(JSON.stringify({ mcpServers: { deepseek: { type: 'stdio', command: process.execPath, args: [DS_MCP], env, timeout: 3600000, alwaysLoad: true } } }));
+}
+const DEEPSEEK_LEAD_PROMPT = '\n\n# 子代理：DeepSeek（重要）\n'
+  + '用户在网页里选择了让 DeepSeek 当你的子代理，目的是让你少写代码、少跑命令，节省你的额度。Claude 自带的 Task / Agent 子代理已关闭。\n'
+  + 'DeepSeek 比你弱，只会照字面执行，不能让它自己做判断。分工：你负责需要判断的部分（理解需求、读懂代码、决定改法、设计用例、审核结果），'
+  + 'DeepSeek 负责把你的决定「打成代码 / 跑出结果」。\n'
+  + '默认委派给 mcp__deepseek__deepseek_task 的工作——只要你的说明比要写的代码短，就交给它：\n'
+  + '- 按用例清单写测试：你在 steps 里列出每个函数的输入 → 期望输出（含边界情况），它负责写测试文件\n'
+  + '- 加注释 / docstring / 类型标注：你给出每个函数一句话说明和参数类型，它负责写进去\n'
+  + '- 多处重复、机械的修改：改名、批量替换、按同一模式改多个文件\n'
+  + '- 按你写好的改法实现代码（写明文件、函数、具体逻辑；关键几行可以直接给出）\n'
+  + '- 运行命令（测试、构建、装依赖）并汇报输出\n'
+  + '只有这些自己做：需要判断的部分、一两行的小改动、说明会比代码本身还长的改动、核实它的结果。\n'
+  + '写任务时：steps 逐条写清楚（哪个文件、哪个函数、改成什么、用例的输入和期望值），files 写全它可以碰的文件（写模式下只能改这些），'
+  + 'do_not 写明不许做的事（比如「不许改函数的行为」），expected_output 写清要交回什么。一次交一个说明得清楚的工作单元（比如「给这 8 个函数按下列用例写测试」），'
+  + '不同文件的任务可以在同一条回复里并行发出。\n'
+  + 'DeepSeek 看不到这段对话，也不能问你问题；遇到和步骤不符的情况它会停下并报 BLOCKED，这时由你判断后再给新指令（mcp__deepseek__deepseek_continue 接着同一个 thread_id）。\n'
+  + '它交回的结果一定要自己读文件或 diff 核实，不要直接相信。如果用户明确说「你自己做」「别用子代理」，就照用户说的。';
 
 // ============ 出口锁：claude 只走指定代理，出口 IP 不对就拦 ============
 // 配置在 ~/.claude-web/egress.json（bin/egress-init.js 生成），没有这个文件就不启用，行为和以前一样。
@@ -655,7 +737,11 @@ function startRun({ cwd, message, attachments, sessionId, model, effort, permiss
   };
   // Codex 子代理：挂 MCP、关掉 Claude 自带子代理；自动放行 codex 工具（default / plan 模式下仍会弹框问）
   let webPrompt = WEB_PROMPT;
-  if (subagent && subagent.model && CODEX_BIN) {
+  if (subagent && subagent.kind === 'deepseek') {
+    cliArgs.push('--mcp-config', deepseekMcpConfig(subagent, permissionMode, tmpFile, runId, eventKey), '--disallowedTools', 'Task,Agent');
+    if (['acceptEdits', 'auto', 'bypassPermissions'].includes(permissionMode)) cliArgs.push('--allowedTools', 'mcp__deepseek__deepseek_task,mcp__deepseek__deepseek_continue');
+    webPrompt += DEEPSEEK_LEAD_PROMPT;
+  } else if (subagent && subagent.model && CODEX_BIN) {
     cliArgs.push('--mcp-config', codexMcpConfig(subagent, permissionMode, tmpFile, runId, eventKey), '--disallowedTools', 'Task,Agent');
     if (['acceptEdits', 'auto', 'bypassPermissions'].includes(permissionMode)) cliArgs.push('--allowedTools', 'mcp__codex__codex_task,mcp__codex__codex_continue');
     webPrompt += CODEX_LEAD_PROMPT;
@@ -1193,6 +1279,32 @@ const server = http.createServer(async (req, res) => {
         let lines = []; try { lines = fs.readFileSync(path.join(CODEX_TRACE_DIR, id + '.jsonl'), 'utf8').split('\n').filter(Boolean); } catch {}
         return json(res, 200, lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean));
       }
+      case '/api/deepseek': {
+        // GET：设置（Key 只给末 4 位）；PUT {apiKey?, baseUrl?, models?}：保存；POST：用 Key 拉一次模型列表（顺便测试 Key）
+        const cfg = loadDeepseek();
+        const pub = (c) => ({ configured: !!c.apiKey, keyHint: c.apiKey ? '…' + c.apiKey.slice(-4) : '', baseUrl: c.baseUrl, models: c.models });
+        if (req.method === 'GET') return json(res, 200, pub(cfg));
+        if (req.method === 'PUT') {
+          const b = await readBody(req);
+          if (typeof b.apiKey === 'string') cfg.apiKey = b.apiKey.trim();
+          if (typeof b.baseUrl === 'string' && b.baseUrl.trim()) {
+            try { if (!/^https?:$/.test(new URL(b.baseUrl.trim()).protocol)) throw 0; } catch { return json(res, 400, { error: '接口地址无效' }); }
+            cfg.baseUrl = b.baseUrl.trim().replace(/\/$/, '');
+          }
+          if (Array.isArray(b.models)) cfg.models = b.models.filter((m) => typeof m === 'string' && /^[\w.\-:/]+$/.test(m)).slice(0, 50);
+          saveDeepseek(cfg);
+          return json(res, 200, pub(cfg));
+        }
+        if (req.method === 'POST') {
+          if (!cfg.apiKey) return json(res, 400, { error: '先填写 API Key' });
+          try {
+            const ms = await deepseekListModels(cfg);
+            if (ms.length) { cfg.models = ms; saveDeepseek(cfg); }
+            return json(res, 200, { ...pub(cfg), ok: true });
+          } catch (e) { return json(res, 400, { error: '连接 DeepSeek 失败：' + e.message }); }
+        }
+        return json(res, 405, { error: 'method' });
+      }
       case '/api/codex': {
         // GET：是否装了 Codex、模型列表、账号和登录状态；POST {name}：新建账号；DELETE ?id=：移除（只删本机，不登出）；
         // POST /api/codex?login=<id>：打开登录窗口
@@ -1347,6 +1459,8 @@ const server = http.createServer(async (req, res) => {
           if (typeof body.account === 'string' && getAccount(body.account)) cur.account = body.account;
           if (typeof body.codexModel === 'string' && /^[\w.\-]*$/.test(body.codexModel)) cur.codexModel = body.codexModel;
           if (CODEX_EFFORTS.includes(body.codexEffort)) cur.codexEffort = body.codexEffort;
+          if (['claude', 'codex', 'deepseek'].includes(body.subKind)) cur.subKind = body.subKind;
+          if (typeof body.dsModel === 'string' && /^[\w.\-:/]*$/.test(body.dsModel)) cur.dsModel = body.dsModel;
           if (typeof body.codexAccount === 'string' && getCodexAccount(body.codexAccount)) cur.codexAccount = body.codexAccount;
           fs.writeFileSync(f, JSON.stringify(cur, null, 2) + '\n');
         }
@@ -1383,6 +1497,8 @@ const server = http.createServer(async (req, res) => {
         const body = await readBody(req);
         const cwd = checkDir(body.cwd);
         if (activeRun(cwd)) return json(res, 409, { error: '这个项目上一条消息还在处理中' });
+        if (body.dsModel && !loadDeepseek().apiKey) return json(res, 400, { error: '还没设置 DeepSeek API Key：在「子代理 → DeepSeek 设置」里填写' });
+        if (body.dsModel) delete body.codexModel;
         if (body.codexModel && !CODEX_BIN) return json(res, 400, { error: '没有找到 Codex（codex 命令），子代理请先切回「Claude」' });
         if (body.codexModel && !getCodexAccount(body.codexAccount)) return json(res, 400, { error: '选中的 Codex 账号已经不存在了，请重新选择' });
         if (body.codexModel && !codexAccountStatus(getCodexAccount(body.codexAccount)).loggedIn) return json(res, 400, { error: 'Codex 账号还没登录：在「子代理」里点「Codex 账号」登录' });
